@@ -1,0 +1,276 @@
+# ============================================================
+# VerdictAI — pricing.yaml
+# ============================================================
+# Last updated: 07 April 2026
+# Sources:
+#   OpenAI:    https://developers.openai.com/api/docs/pricing
+#   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
+#   Google:    https://ai.google.dev/gemini-api/docs/pricing
+#
+# Prices are per 1M tokens in USD.
+# VerdictAI reads this at runtime to calculate cost per eval run,
+# cost per 1K tokens shown in UI, and cost-per-quality-point ratio.
+#
+# FREE TIER SUMMARY (important for users):
+#   OpenAI:    No free tier. Pay-as-you-go only. New accounts may
+#              get $5 one-time credit (not guaranteed, varies).
+#   Anthropic: ~$5 starter credit for new API accounts. No ongoing
+#              free tier after that. Pay-as-you-go.
+#   Google:    MOST GENEROUS — unlimited free tier with rate limits
+#              (up to 1,000 requests/day, no credit card required).
+#              Best entry point for users testing VerdictAI for free.
+#
+# MVP NOTE: Only models with mvp_enabled: true are shown in the UI.
+# All others are available in v1.1. Pricing is stored for all models
+# so cost calculations work correctly when they are enabled.
+#
+# To update pricing: edit values below and open a GitHub PR citing
+# the official source URL as proof of new price.
+# ============================================================
+
+models:
+
+  # ════════════════════════════════════════════════════════
+  # OPENAI
+  # Verified: https://developers.openai.com/api/docs/pricing
+  # 07 April 2026
+  # Free tier: None (pay-as-you-go only)
+  # API string format: model="gpt-5.4" etc.
+  # ════════════════════════════════════════════════════════
+
+  gpt-5-4:
+    provider: openai
+    api_model_string: "gpt-5.4"
+    display_name: "GPT-5.4"
+    description: "OpenAI current flagship. Best quality evals and default judge model."
+    mvp_enabled: true
+    is_judge_capable: true
+    is_default_judge: true
+    free_tier: false
+    input_per_1m_usd: 2.50
+    cached_input_per_1m_usd: 0.25
+    output_per_1m_usd: 15.00
+    long_context_input_per_1m_usd: 5.00       # applies when input > 272K tokens
+    long_context_output_per_1m_usd: 22.50
+    batch_input_per_1m_usd: 1.25
+    batch_output_per_1m_usd: 7.50
+    context_window_tokens: 1050000
+    supported_modalities: [text, image]
+    notes: "Pinned snapshot: gpt-5.4-2026-03-05. Long context pricing kicks in above 272K input tokens."
+
+  gpt-5-4-mini:
+    provider: openai
+    api_model_string: "gpt-5.4-mini"
+    display_name: "GPT-5.4 mini"
+    description: "Cost-efficient OpenAI model. 3x cheaper than GPT-5.4 with strong capability."
+    mvp_enabled: true
+    is_judge_capable: true
+    is_default_judge: false
+    free_tier: false
+    input_per_1m_usd: 0.75
+    cached_input_per_1m_usd: 0.075
+    output_per_1m_usd: 4.50
+    batch_input_per_1m_usd: 0.375
+    batch_output_per_1m_usd: 2.25
+    context_window_tokens: 128000
+    supported_modalities: [text, image]
+    notes: "Pinned snapshot: gpt-5.4-mini-2026-03-17. Recommended for dev testing as judge."
+
+  gpt-5-4-nano:
+    provider: openai
+    api_model_string: "gpt-5.4-nano"
+    display_name: "GPT-5.4 nano"
+    description: "Most affordable OpenAI model. Best for simple classification tasks."
+    mvp_enabled: false                          # v1.1 — text only, limited use cases for eval
+    is_judge_capable: false
+    is_default_judge: false
+    free_tier: false
+    input_per_1m_usd: 0.20
+    cached_input_per_1m_usd: 0.02
+    output_per_1m_usd: 1.25
+    batch_input_per_1m_usd: 0.10
+    batch_output_per_1m_usd: 0.625
+    context_window_tokens: 128000
+    supported_modalities: [text]
+    notes: "Text only. Cheaper than mini but less capable. Enable in v1.1 for high-volume simple evals."
+
+  gpt-5-4-pro:
+    provider: openai
+    api_model_string: "gpt-5.4-pro"
+    display_name: "GPT-5.4 pro"
+    description: "OpenAI highest capability model. For the most complex reasoning tasks."
+    mvp_enabled: false                          # v1.1 — very expensive, niche use case
+    is_judge_capable: true
+    is_default_judge: false
+    free_tier: false
+    input_per_1m_usd: 30.00
+    output_per_1m_usd: 180.00
+    long_context_input_per_1m_usd: 60.00
+    long_context_output_per_1m_usd: 270.00
+    batch_input_per_1m_usd: 15.00
+    batch_output_per_1m_usd: 90.00
+    context_window_tokens: 1050000
+    supported_modalities: [text, image]
+    notes: "Responses API only. Responses may take several minutes. Use background mode."
+
+  # ════════════════════════════════════════════════════════
+  # ANTHROPIC
+  # Verified: https://platform.claude.com/docs/en/about-claude/pricing
+  # 07 April 2026
+  # Free tier: ~$5 starter credits for new API accounts only.
+  #            No ongoing free tier. Pay-as-you-go after.
+  # API string format: model="claude-sonnet-4-6" etc.
+  # ════════════════════════════════════════════════════════
+
+  claude-sonnet-4-6:
+    provider: anthropic
+    api_model_string: "claude-sonnet-4-6"
+    display_name: "Claude Sonnet 4.6"
+    description: "Anthropic flagship balanced model. 1M token context at standard pricing."
+    mvp_enabled: true
+    is_judge_capable: true
+    is_default_judge: false
+    free_tier: false                            # ~$5 starter credit for new accounts only
+    input_per_1m_usd: 3.00
+    cached_input_per_1m_usd: 0.30              # 90% off via prompt caching
+    output_per_1m_usd: 15.00
+    batch_input_per_1m_usd: 1.50              # 50% off via Batch API
+    batch_output_per_1m_usd: 7.50
+    context_window_tokens: 1000000
+    max_output_tokens: 8096
+    supported_modalities: [text, image]
+    long_context_threshold_tokens: 200000
+    long_context_input_per_1m_usd: 6.00       # 2x when input > 200K tokens
+    long_context_output_per_1m_usd: 22.50
+    notes: "Best balance of quality and cost. Standard pricing up to 200K input tokens."
+
+  claude-haiku-4-5:
+    provider: anthropic
+    api_model_string: "claude-haiku-4-5-20251001"
+    display_name: "Claude Haiku 4.5"
+    description: "Anthropic fastest model. 5x cheaper than Sonnet. Text only in MVP."
+    mvp_enabled: true
+    is_judge_capable: false
+    is_default_judge: false
+    free_tier: false
+    input_per_1m_usd: 1.00
+    cached_input_per_1m_usd: 0.10
+    output_per_1m_usd: 5.00
+    batch_input_per_1m_usd: 0.50
+    batch_output_per_1m_usd: 2.50
+    context_window_tokens: 200000
+    max_output_tokens: 8096
+    supported_modalities: [text]               # image not supported in MVP
+    notes: "Text only — image input not supported. Near-frontier performance at budget price."
+
+  claude-opus-4-6:
+    provider: anthropic
+    api_model_string: "claude-opus-4-6"
+    display_name: "Claude Opus 4.6"
+    description: "Anthropic most capable model. 1M context, best for complex reasoning."
+    mvp_enabled: false                          # v1.1 — expensive, use Sonnet for MVP
+    is_judge_capable: true
+    is_default_judge: false
+    free_tier: false
+    input_per_1m_usd: 5.00
+    cached_input_per_1m_usd: 0.50
+    output_per_1m_usd: 25.00
+    batch_input_per_1m_usd: 2.50
+    batch_output_per_1m_usd: 12.50
+    context_window_tokens: 1000000
+    max_output_tokens: 8096
+    supported_modalities: [text, image]
+    notes: "66% cheaper than previous Opus ($15/$75 → $5/$25). Enable in v1.1."
+
+  # ════════════════════════════════════════════════════════
+  # GOOGLE GEMINI
+  # Verified: https://ai.google.dev/gemini-api/docs/pricing
+  # 07 April 2026
+  # Free tier: MOST GENEROUS — unlimited free access with rate limits
+  #            Up to 1,000 requests/day across models. No credit card.
+  #            Best entry point for users testing VerdictAI for free.
+  #            Rate limits: 15 RPM (2.5 Pro), 1,000 RPD (most models)
+  # API string format: model_name="gemini-2.5-pro" etc.
+  # ════════════════════════════════════════════════════════
+
+  gemini-2-5-pro:
+    provider: google
+    api_model_string: "gemini-2.5-pro"
+    display_name: "Gemini 2.5 Pro"
+    description: "Google most capable reasoning model. Cheaper input than GPT-5.4."
+    mvp_enabled: true
+    is_judge_capable: true
+    is_default_judge: false
+    free_tier: true                             # free with rate limits (25 RPD free tier)
+    free_tier_requests_per_day: 25
+    free_tier_rpm: 5
+    input_per_1m_usd: 1.25
+    cached_input_per_1m_usd: 0.3125           # 75% off via context caching
+    output_per_1m_usd: 10.00
+    batch_input_per_1m_usd: 0.625
+    batch_output_per_1m_usd: 5.00
+    context_window_tokens: 1000000
+    max_output_tokens: 8192
+    supported_modalities: [text, image]
+    long_context_threshold_tokens: 200000
+    long_context_input_per_1m_usd: 2.50       # 2x when input > 200K tokens
+    long_context_output_per_1m_usd: 15.00
+    notes: "Free tier: 25 RPD / 5 RPM. Paid tier: standard pricing. Strong reasoning benchmarks."
+
+  gemini-2-5-flash:
+    provider: google
+    api_model_string: "gemini-2.5-flash"
+    display_name: "Gemini 2.5 Flash"
+    description: "Google balanced speed and cost. Best Gemini model for high-volume evals."
+    mvp_enabled: true
+    is_judge_capable: false
+    is_default_judge: false
+    free_tier: true                             # free with rate limits
+    free_tier_requests_per_day: 1000
+    free_tier_rpm: 15
+    input_per_1m_usd: 0.30
+    cached_input_per_1m_usd: 0.03
+    output_per_1m_usd: 2.50
+    batch_input_per_1m_usd: 0.15
+    batch_output_per_1m_usd: 1.25
+    audio_input_per_1m_usd: 1.00              # audio is 3x more expensive than text
+    context_window_tokens: 1000000
+    max_output_tokens: 8192
+    supported_modalities: [text, image]
+    notes: "Free tier: 1,000 RPD / 15 RPM. Recommended first eval for users testing VerdictAI."
+
+  gemini-2-5-flash-lite:
+    provider: google
+    api_model_string: "gemini-2.5-flash-lite"
+    display_name: "Gemini 2.5 Flash-Lite"
+    description: "Google most affordable model. Best for simple classification at scale."
+    mvp_enabled: false                          # v1.1 — enable once basic models proven
+    is_judge_capable: false
+    is_default_judge: false
+    free_tier: true
+    free_tier_requests_per_day: 1000
+    free_tier_rpm: 15
+    input_per_1m_usd: 0.10
+    cached_input_per_1m_usd: 0.01
+    output_per_1m_usd: 0.40
+    context_window_tokens: 1000000
+    max_output_tokens: 8192
+    supported_modalities: [text, image]
+    notes: "Cheapest paid option. Enable in v1.1 for budget-focused users."
+
+  gemini-2-0-flash:
+    provider: google
+    api_model_string: "gemini-2.0-flash"
+    display_name: "Gemini 2.0 Flash ⚠️"
+    description: "Previous Google Flash model. DEPRECATED — shutting down June 1 2026."
+    mvp_enabled: false                          # deprecated — do not enable
+    is_judge_capable: false
+    is_default_judge: false
+    free_tier: true
+    input_per_1m_usd: 0.10
+    cached_input_per_1m_usd: 0.025
+    output_per_1m_usd: 0.40
+    context_window_tokens: 1000000
+    supported_modalities: [text, image]
+    deprecation_date: "2026-06-01"
+    notes: "DEPRECATED. Shuts down June 1 2026. Do not enable. Listed for reference only."
