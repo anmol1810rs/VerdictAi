@@ -1,0 +1,389 @@
+# ============================================================
+# VerdictAI — models.yaml
+# ============================================================
+# Last updated: 07 April 2026
+#
+# This file controls:
+#   1. Which models appear in the MVP UI (mvp_enabled)
+#   2. Exact API strings Claude Code uses to call each model
+#   3. Modality support — which models handle text vs image
+#   4. Judge model configuration
+#   5. Rubric dimension definitions
+#   6. Rubric preset weights
+#   7. Dev mode mock config
+#
+# MVP MODEL SUMMARY (6 models, 2 per provider):
+#   OpenAI:    gpt-5.4 (flagship), gpt-5.4-mini (budget)
+#   Anthropic: claude-sonnet-4-6 (flagship), claude-haiku-4-5 (budget)
+#   Google:    gemini-2.5-pro (flagship), gemini-2.5-flash (budget)
+#
+# All other models: mvp_enabled: false → hidden in UI, available v1.1
+# ============================================================
+
+# ── JUDGE MODEL CONFIG ────────────────────────────────────
+# The judge evaluates all model outputs using the user's
+# OpenAI API key. Creator pays $0 in judge costs post-launch.
+# DEV_MODE=true bypasses real judge and uses mock scores.
+
+judge:
+  default_model: gpt-5-4                       # key from pricing.yaml
+  dev_mode_model: mock                          # uses mock_scores below when DEV_MODE=true
+  fallback_model: gpt-5-4-mini                 # used if default fails or user has no GPT-5.4 access
+  user_key_field: openai_api_key               # judge always uses user's OpenAI key
+  self_preference_warning: true                # warn if judge model = one of the eval models
+
+  # UI message shown when judge model matches an eval model:
+  self_preference_message: >
+    Warning: {model} is selected as both an eval model and the judge model.
+    This may introduce self-preference bias — the judge may score its own
+    outputs higher. Consider switching the judge to a different model.
+
+# ── MVP MODEL LIST ────────────────────────────────────────
+# Defines the 6 models shown in the MVP UI.
+# Order determines display order in the model selection panel.
+# api_model_string is the exact value passed to the provider API.
+
+mvp_models:
+
+  - id: gpt-5-4
+    api_model_string: "gpt-5.4"
+    provider: openai
+    display_name: "GPT-5.4"
+    badge: "Flagship · Judge"
+    color: "#10a37f"
+    supports_text: true
+    supports_image: true
+    client_library: "openai"
+    request_format: "chat_completions"
+    image_format: "url_base64"                 # {"type": "image_url", "image_url": {"url": "data:..."}}
+    token_fields:
+      input: "usage.prompt_tokens"
+      output: "usage.completion_tokens"
+    response_field: "choices[0].message.content"
+
+  - id: gpt-5-4-mini
+    api_model_string: "gpt-5.4-mini"
+    provider: openai
+    display_name: "GPT-5.4 mini"
+    badge: "Budget"
+    color: "#10a37f"
+    supports_text: true
+    supports_image: true
+    client_library: "openai"
+    request_format: "chat_completions"
+    image_format: "url_base64"
+    token_fields:
+      input: "usage.prompt_tokens"
+      output: "usage.completion_tokens"
+    response_field: "choices[0].message.content"
+
+  - id: claude-sonnet-4-6
+    api_model_string: "claude-sonnet-4-6"
+    provider: anthropic
+    display_name: "Claude Sonnet 4.6"
+    badge: "Flagship · 1M ctx"
+    color: "#d97706"
+    supports_text: true
+    supports_image: true
+    client_library: "anthropic"
+    request_format: "messages"
+    image_format: "base64_block"               # {"type": "image", "source": {"type": "base64", ...}}
+    token_fields:
+      input: "usage.input_tokens"
+      output: "usage.output_tokens"
+    response_field: "content[0].text"
+    system_prompt_field: "system"              # Anthropic passes system prompt separately
+
+  - id: claude-haiku-4-5
+    api_model_string: "claude-haiku-4-5-20251001"
+    provider: anthropic
+    display_name: "Claude Haiku 4.5"
+    badge: "Budget · Text only"
+    color: "#d97706"
+    supports_text: true
+    supports_image: false                      # Haiku 4.5 does not support image input
+    client_library: "anthropic"
+    request_format: "messages"
+    image_format: null
+    token_fields:
+      input: "usage.input_tokens"
+      output: "usage.output_tokens"
+    response_field: "content[0].text"
+    system_prompt_field: "system"
+
+  - id: gemini-2-5-pro
+    api_model_string: "gemini-2.5-pro"
+    provider: google
+    display_name: "Gemini 2.5 Pro"
+    badge: "Flagship · Free tier"
+    color: "#4285f4"
+    supports_text: true
+    supports_image: true
+    client_library: "google.generativeai"
+    request_format: "generate_content"
+    image_format: "inline_data"                # {"mime_type": "image/jpeg", "data": base64}
+    token_fields:
+      input: "usage_metadata.prompt_token_count"
+      output: "usage_metadata.candidates_token_count"
+    response_field: "text"
+    free_tier_note: "25 requests/day free. No credit card required."
+
+  - id: gemini-2-5-flash
+    api_model_string: "gemini-2.5-flash"
+    provider: google
+    display_name: "Gemini 2.5 Flash"
+    badge: "Budget · Free tier"
+    color: "#4285f4"
+    supports_text: true
+    supports_image: true
+    client_library: "google.generativeai"
+    request_format: "generate_content"
+    image_format: "inline_data"
+    token_fields:
+      input: "usage_metadata.prompt_token_count"
+      output: "usage_metadata.candidates_token_count"
+    response_field: "text"
+    free_tier_note: "1,000 requests/day free. Best free entry point for VerdictAI."
+
+# ── MODALITY SUPPORT MATRIX ───────────────────────────────
+# VerdictAI detects the modality of the uploaded dataset and
+# filters the model selection list to compatible models only.
+
+modality_matrix:
+
+  text:
+    description: "Text-only prompts (CSV or JSONL)"
+    upload_format: "csv_or_jsonl"
+    mvp_compatible_models:
+      - gpt-5-4
+      - gpt-5-4-mini
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
+      - gemini-2-5-pro
+      - gemini-2-5-flash
+
+  image_text:
+    description: "Image + text prompts (folder + manifest.json)"
+    upload_format: "folder_with_manifest"
+    mvp_compatible_models:
+      - gpt-5-4
+      - gpt-5-4-mini
+      - claude-sonnet-4-6
+      - gemini-2-5-pro
+      - gemini-2-5-flash
+    incompatible_models:
+      claude-haiku-4-5: "Claude Haiku 4.5 does not support image inputs. Switch to Claude Sonnet 4.6."
+
+  structured_data:
+    description: "Structured/tabular data prompts (embedded JSON)"
+    upload_format: "jsonl_with_data_field"
+    mvp_compatible_models:
+      - gpt-5-4
+      - gpt-5-4-mini
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
+      - gemini-2-5-pro
+      - gemini-2-5-flash
+
+  video:
+    description: "Video input evaluation"
+    mvp_compatible_models: []
+    status: "coming_v1_1"
+
+  audio:
+    description: "Audio input evaluation"
+    mvp_compatible_models: []
+    status: "coming_v1_1"
+
+# ── PROVIDER PLATFORM SUGGESTIONS ────────────────────────
+# When a user selects an incompatible model for a modality,
+# VerdictAI suggests the nearest compatible alternative
+# from the same provider.
+
+platform_suggestions:
+  claude-haiku-4-5:
+    incompatible_with: image_text
+    suggest: claude-sonnet-4-6
+    message: "Claude Haiku 4.5 doesn't support image inputs. Try Claude Sonnet 4.6 instead?"
+
+# ── EVALUATION DIMENSIONS ─────────────────────────────────
+# Five dimensions scored on every model response.
+# auto_calculated: true means derived from tokens, not judge.
+
+dimensions:
+
+  accuracy:
+    display_name: "Factual Accuracy"
+    description: "Does the response contain correct, verifiable information?"
+    judge_instruction: >
+      Score how factually accurate the response is (0-10).
+      Quote the specific claim that most influenced your score.
+      Explain in one sentence why this score was given.
+    min_weight: 0
+    auto_calculated: false
+
+  hallucination:
+    display_name: "Hallucination Rate"
+    description: "Does the model state things that are false or unsupported?"
+    judge_instruction: >
+      Score the hallucination risk (0 = severe hallucinations, 10 = none detected).
+      If any hallucination is found, quote the exact excerpt that triggered the flag.
+      State what source or reasoning confirmed it is a hallucination.
+    min_weight: 1                               # CANNOT be zero — enforced in UI
+    mandatory_penalty: true                     # high score overrides positive verdict
+    penalty_threshold: 7                        # scores >= 7/10 trigger verdict warning
+    auto_calculated: false
+
+  instruction_following:
+    display_name: "Instruction Following"
+    description: "Did the model do exactly what was asked?"
+    judge_instruction: >
+      Score how well the response follows the prompt instructions (0-10).
+      Identify any instruction that was ignored, partially followed, or misinterpreted.
+      Quote the specific part of the prompt that was not followed, if applicable.
+    min_weight: 0
+    auto_calculated: false
+
+  conciseness:
+    display_name: "Conciseness"
+    description: "Is the response appropriately sized — not too long, not too short?"
+    judge_instruction: >
+      Score response length appropriateness (0 = badly sized, 10 = perfect fit).
+      Note if the response is padded with unnecessary content or is too brief.
+      One sentence explanation.
+    min_weight: 0
+    auto_calculated: false
+
+  cost_efficiency:
+    display_name: "Cost Efficiency"
+    description: "Cost per quality point — calculated automatically from token usage."
+    judge_instruction: null                     # auto-calculated, no judge prompt needed
+    min_weight: 0
+    auto_calculated: true                       # = total_cost_usd / weighted_quality_score
+
+# ── RUBRIC PRESETS ────────────────────────────────────────
+# Weights must sum to 100. Values are percentage points.
+# Users can customise any preset or build their own.
+
+rubric_presets:
+
+  customer_support:
+    display_name: "Customer Support"
+    icon: "💬"
+    description: "Evaluating LLMs for customer-facing support bots."
+    use_cases:
+      - Support chatbots
+      - FAQ automation
+      - Ticket resolution
+    weights:
+      accuracy: 20
+      hallucination: 30
+      instruction_following: 30
+      conciseness: 15
+      cost_efficiency: 5
+
+  technical_documentation:
+    display_name: "Technical Documentation"
+    icon: "📄"
+    description: "Evaluating LLMs writing technical content or code comments."
+    use_cases:
+      - API documentation
+      - Code comment generation
+      - README writing
+    weights:
+      accuracy: 35
+      hallucination: 35
+      instruction_following: 20
+      conciseness: 5
+      cost_efficiency: 5
+
+  data_labeling_qa:
+    display_name: "Data Labeling QA"
+    icon: "🏷️"
+    description: "TPMs evaluating prompt engineer quality and annotation pipeline consistency."
+    use_cases:
+      - LLM fine-tuning data QA
+      - Prompt engineer performance review
+      - Ground truth alignment checking
+    weights:
+      accuracy: 30
+      hallucination: 25
+      instruction_following: 25
+      conciseness: 10
+      cost_efficiency: 10
+
+# ── DEV MODE MOCK CONFIG ──────────────────────────────────
+# When DEV_MODE=true in .env, VerdictAI skips real API calls
+# and returns these mock values. Zero cost, instant results.
+# Use for all development sessions. Switch off only for final
+# integration testing (Sessions 7-8).
+
+dev_mode:
+  enabled_via_env: "DEV_MODE"                  # set DEV_MODE=true in .env to activate
+  mock_latency_ms: 900                          # simulates real API latency for realistic UX
+
+  mock_scores:
+    accuracy: 7.2
+    hallucination: 2.8                          # low number = low hallucination = good
+    instruction_following: 8.1
+    conciseness: 6.5
+    cost_efficiency: auto
+
+  mock_reasoning:
+    accuracy: >
+      Response contains accurate information consistent with the prompt. One minor
+      claim could not be independently verified from the given context.
+    hallucination: >
+      No significant hallucinations detected. The response stays grounded in the
+      prompt content without introducing unsupported external claims.
+    instruction_following: >
+      All primary instructions were followed. One sub-requirement in the prompt
+      was partially addressed rather than fully completed.
+    conciseness: >
+      Response length is broadly appropriate but slightly verbose in the
+      middle section. Could be trimmed by approximately 20% without losing substance.
+
+  mock_models:                                  # mock responses returned per model in dev
+    gpt-5-4: "[MOCK] GPT-5.4 response for development testing."
+    gpt-5-4-mini: "[MOCK] GPT-5.4 mini response for development testing."
+    claude-sonnet-4-6: "[MOCK] Claude Sonnet 4.6 response for development testing."
+    claude-haiku-4-5: "[MOCK] Claude Haiku 4.5 response for development testing."
+    gemini-2-5-pro: "[MOCK] Gemini 2.5 Pro response for development testing."
+    gemini-2-5-flash: "[MOCK] Gemini 2.5 Flash response for development testing."
+
+# ── API CLIENT MAPPING ────────────────────────────────────
+# Maps provider names to the Python library and init pattern.
+# Claude Code uses this in Session 1 to scaffold the provider
+# abstraction layer correctly.
+
+api_clients:
+
+  openai:
+    library: "openai"
+    install: "pip install openai"
+    async_client: "AsyncOpenAI"
+    init: "client = AsyncOpenAI(api_key=user_key)"
+    call: "client.chat.completions.create(model=..., messages=[...])"
+    image_content_type: "image_url"
+    image_wrapper: '{"type": "image_url", "image_url": {"url": "data:{mime};base64,{b64}"}}'
+    system_prompt_location: "messages[0] with role=system"
+
+  anthropic:
+    library: "anthropic"
+    install: "pip install anthropic"
+    async_client: "AsyncAnthropic"
+    init: "client = AsyncAnthropic(api_key=user_key)"
+    call: "client.messages.create(model=..., messages=[...], system=...)"
+    image_content_type: "image"
+    image_wrapper: '{"type": "image", "source": {"type": "base64", "media_type": "{mime}", "data": "{b64}"}}'
+    system_prompt_location: "system parameter (separate from messages)"
+
+  google:
+    library: "google-generativeai"
+    install: "pip install google-generativeai"
+    async_client: "GenerativeModel"
+    init: "genai.configure(api_key=user_key); model = genai.GenerativeModel(model_name)"
+    call: "model.generate_content_async([prompt, image_part])"
+    image_content_type: "inline_data"
+    image_wrapper: '{"mime_type": "{mime}", "data": b64_bytes}'
+    system_prompt_location: "prepend to content list as text part"
