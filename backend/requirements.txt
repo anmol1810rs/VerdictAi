@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+anthropic
+openai
+google-generativeai
+pydantic
+python-dotenv
+sqlalchemy
+aiosqlite
+reportlab
+pyyaml
+python-multipart
+httpx
+aiofiles
