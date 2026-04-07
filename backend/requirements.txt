@@ -12,3 +12,6 @@ pyyaml
 python-multipart
 httpx
 aiofiles
+pytest
+pytest-asyncio
+pytest-mock
