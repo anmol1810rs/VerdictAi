@@ -1,10 +1,14 @@
 """
-VerdictAI — Streamlit frontend skeleton.
+VerdictAI — Streamlit frontend.
 Session 1: layout, API key entry (Story 1.2), file upload (Story 1.1),
            rubric configurator (Story 1.3).
+Session 2: full validation (Story 1.6), modality detection (Story 1.5),
+           engineer tagging + run label (Story 1.4).
+Session 3: background eval + status polling (Story 1.7),
+           run history sidebar with filters (Story 1.8).
 """
-import io
 import os
+import time
 
 import requests
 import streamlit as st
@@ -40,7 +44,21 @@ pricing_cfg = load_pricing_config()
 
 MVP_MODELS = models_cfg["mvp_models"]
 PRESETS = models_cfg["rubric_presets"]
-DEV_MOCK = models_cfg["dev_mode"]
+
+# ── Modality display helpers ───────────────────────────────────────────────
+
+MODALITY_ICONS = {
+    "text": "📄",
+    "image_text": "🖼️",
+    "structured_data": "📊",
+}
+
+STATUS_ICONS = {
+    "complete": "✅",
+    "running": "⏳",
+    "failed": "❌",
+    "pending": "🔄",
+}
 
 # ── Session state defaults ─────────────────────────────────────────────────
 
@@ -54,11 +72,18 @@ if "rubric" not in st.session_state:
     st.session_state.rubric = None
 if "last_run_id" not in st.session_state:
     st.session_state.last_run_id = None
+if "polling_run_id" not in st.session_state:
+    st.session_state.polling_run_id = None  # run_id being actively polled
+if "eval_complete_banner" not in st.session_state:
+    st.session_state.eval_complete_banner = False  # show completion notice until user dismisses
+if "history_model_filter" not in st.session_state:
+    st.session_state.history_model_filter = ""
+if "history_engineer_filter" not in st.session_state:
+    st.session_state.history_engineer_filter = ""
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# SIDEBAR — API Keys (Story 1.2)
-# Keys are stored only in session_state — never written to disk or DB
+# SIDEBAR — API Keys (Story 1.2) + Run History (Story 1.8)
 # ══════════════════════════════════════════════════════════════════════════
 
 with st.sidebar:
@@ -66,6 +91,7 @@ with st.sidebar:
     st.caption("Run structured LLM evaluations in minutes.")
     st.divider()
 
+    # ── API Keys ──────────────────────────────────────────────────────────
     st.header("🔑 API Keys")
     st.caption(
         "Keys are used only for this session and **never stored**. "
@@ -102,8 +128,86 @@ with st.sidebar:
     else:
         st.warning("OpenAI key required to run evaluations.")
 
+    st.caption("💡 Google Gemini has a **free tier** — 1,000 requests/day, no credit card required.")
+
+    # ── Run History (Story 1.8) ───────────────────────────────────────────
     st.divider()
-    st.caption("💡 Google Gemini has a **free tier** — 1,000 requests/day, no credit card required. Best entry point to try VerdictAI for free.")
+    st.header("📋 Run History")
+
+    # Filter bar
+    with st.expander("🔍 Filters", expanded=False):
+        filter_model = st.text_input(
+            "Filter by model",
+            value=st.session_state.history_model_filter,
+            placeholder="e.g. gpt-5-4",
+            key="sidebar_model_filter",
+        )
+        filter_engineer = st.text_input(
+            "Filter by engineer",
+            value=st.session_state.history_engineer_filter,
+            placeholder="e.g. Alice",
+            key="sidebar_engineer_filter",
+        )
+        col_from, col_to = st.columns(2)
+        with col_from:
+            filter_date_from = st.date_input("From", value=None, key="sidebar_date_from")
+        with col_to:
+            filter_date_to = st.date_input("To", value=None, key="sidebar_date_to")
+
+        if st.button("Clear filters", key="clear_filters"):
+            st.session_state.history_model_filter = ""
+            st.session_state.history_engineer_filter = ""
+            st.rerun()
+
+    # Fetch history from backend
+    try:
+        params: dict = {}
+        if filter_model:
+            params["model"] = filter_model
+        if filter_engineer:
+            params["engineer"] = filter_engineer
+        if filter_date_from:
+            params["date_from"] = filter_date_from.isoformat()
+        if filter_date_to:
+            params["date_to"] = filter_date_to.isoformat()
+
+        hist_resp = requests.get(f"{BACKEND_URL}/eval/history", params=params, timeout=5)
+        if hist_resp.status_code == 200:
+            history_data = hist_resp.json()
+            runs = history_data.get("runs", [])
+
+            if not runs:
+                st.caption("No eval runs yet. Upload a dataset to get started.")
+            else:
+                for run in runs:
+                    modality_icon = MODALITY_ICONS.get(run["modality"], "📄")
+                    status_icon = STATUS_ICONS.get(run["status"], "❓")
+                    label = run.get("run_label") or "Unnamed run"
+                    models_str = ", ".join(run.get("models_selected", []))
+
+                    # Build button label
+                    btn_label = f"{status_icon} {label}"
+                    btn_help = (
+                        f"{modality_icon} {run['modality']} | "
+                        f"{run['created_at']} | "
+                        f"Models: {models_str}"
+                    )
+                    if run["status"] == "complete" and run.get("winning_model"):
+                        btn_help += f" | Winner: {run['winning_model']}"
+                    if run["status"] == "failed" and run.get("error_message"):
+                        btn_help += f" | Error: {run['error_message'][:60]}..."
+
+                    if st.button(btn_label, key=f"hist_{run['id']}", help=btn_help, use_container_width=True):
+                        if run["status"] == "complete":
+                            st.session_state.last_run_id = run["id"]
+                            st.session_state.polling_run_id = None
+                            st.success("Results loaded. Switch to **Results** tab.")
+                        else:
+                            st.info(f"Run status: {run['status']}")
+        else:
+            st.caption("Could not load run history.")
+    except requests.exceptions.ConnectionError:
+        st.caption("Backend offline — history unavailable.")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -138,7 +242,6 @@ with tab_upload:
     )
 
     with st.expander("📥 Download upload templates"):
-        # CSV template
         csv_template = "prompt,expected_output,engineer_name\n" \
                        "What is the capital of France?,Paris,Alice\n" \
                        "Summarise this article in one sentence.,,Bob\n"
@@ -148,7 +251,6 @@ with tab_upload:
             file_name="verdictai_template.csv",
             mime="text/csv",
         )
-        # JSONL template
         jsonl_template = '{"prompt": "What is the capital of France?", "expected_output": "Paris", "engineer_name": "Alice"}\n' \
                          '{"prompt": "Summarise this article in one sentence."}\n'
         st.download_button(
@@ -178,10 +280,8 @@ with tab_upload:
                     st.session_state.uploaded_prompts = meta["prompts"]
                     st.session_state.detected_modality = meta.get("modality", "text")
 
-                    # Show success + summary
                     st.success(f"✓ {meta.get('validation_summary', 'Dataset validated')}")
 
-                    # Show warnings if any
                     if meta.get("warnings"):
                         with st.expander("⚠️ Warnings (non-blocking)"):
                             for warn in meta["warnings"]:
@@ -224,7 +324,6 @@ with tab_rubric:
         selected_label = st.selectbox("Start from a preset", list(preset_options.keys()))
         selected_preset_key = preset_options[selected_label]
 
-    # Load preset weights or use defaults
     if selected_preset_key:
         preset_weights = PRESETS[selected_preset_key]["weights"]
         with col_info:
@@ -262,7 +361,6 @@ with tab_rubric:
             "conciseness": w_conciseness,
             "cost_efficiency": w_cost,
         }
-        # Validate via backend
         try:
             val = requests.post(f"{BACKEND_URL}/rubric/validate", json=rubric, timeout=5)
             if val.status_code == 200:
@@ -271,7 +369,6 @@ with tab_rubric:
             else:
                 st.error(f"Rubric rejected: {val.json()}")
         except requests.exceptions.ConnectionError:
-            # Store locally if backend unreachable during dev
             st.session_state.rubric = rubric
     else:
         st.warning(f"Weights must sum to 100. Current: {total}. Adjust the sliders.")
@@ -279,20 +376,18 @@ with tab_rubric:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# TAB 3 — Model Selection (Story 1.5: modality filtering)
+# TAB 3 — Model Selection (Story 1.5)
 # ──────────────────────────────────────────────────────────────────────────
 
 with tab_models:
     st.header("Select Models to Compare")
     st.caption("Compatible models shown based on your dataset's modality.")
 
-    # Get detected modality from session state (from upload)
     detected_modality = st.session_state.get("detected_modality", "text")
 
     if st.session_state.upload_meta:
         st.info(f"📊 **Detected modality:** {detected_modality}")
 
-        # Fetch compatible models from backend
         with st.spinner("Loading compatible models..."):
             try:
                 compat_resp = requests.get(
@@ -302,11 +397,9 @@ with tab_models:
                 )
                 if compat_resp.status_code == 200:
                     compat_data = compat_resp.json()
-                    compatible_ids = [m["id"] for m in compat_data["compatible_models"]]
                     incompatible_list = compat_data.get("incompatible_models", [])
                     suggestions = compat_data.get("suggestions", {})
 
-                    # Show compatible models as checkboxes
                     st.subheader("✅ Compatible Models")
                     selected_models = []
                     cols = st.columns(2)
@@ -320,7 +413,6 @@ with tab_models:
                             if checked:
                                 selected_models.append(model["id"])
 
-                    # Show incompatible with warnings + suggestions
                     if incompatible_list:
                         st.subheader("❌ Incompatible Models")
                         for inc in incompatible_list:
@@ -347,7 +439,6 @@ with tab_models:
     else:
         st.info("Upload a dataset first to see compatible models.")
 
-    # Free tier note
     st.divider()
     st.caption(
         "💡 **Free tier available:** Gemini 2.5 Flash offers 1,000 requests/day at no cost. "
@@ -356,7 +447,7 @@ with tab_models:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# TAB 4 — Run Evaluation
+# TAB 4 — Run Evaluation (Story 1.7: background eval + status polling)
 # ──────────────────────────────────────────────────────────────────────────
 
 with tab_run:
@@ -366,7 +457,6 @@ with tab_run:
     prompts = st.session_state.uploaded_prompts
     rubric = st.session_state.rubric
 
-    # Pre-run checklist
     checks = {
         "Dataset uploaded": prompts is not None,
         "Rubric configured": rubric is not None,
@@ -379,11 +469,10 @@ with tab_run:
 
     st.divider()
 
-    # Story 1.4 — Engineer name (per-prompt, from upload) + Run label (optional, per-run)
     engineer_name = st.text_input(
         "Prompt engineer name (optional)",
         placeholder="e.g. Alice",
-        help="This tags ALL prompts in this batch to a team member. (Optional)",
+        help="Tags ALL prompts in this batch to a team member. (Optional)",
     )
 
     run_label = st.text_input(
@@ -394,6 +483,45 @@ with tab_run:
     )
 
     all_ready = all(checks.values())
+
+    # ── Story 1.7: status polling loop ────────────────────────────────────
+    polling_run_id = st.session_state.get("polling_run_id")
+    if polling_run_id:
+        try:
+            status_resp = requests.get(f"{BACKEND_URL}/eval/{polling_run_id}/status", timeout=5)
+            if status_resp.status_code == 200:
+                status_data = status_resp.json()
+                current_status = status_data["status"]
+
+                if current_status == "pending":
+                    st.info("🔄 Run queued...")
+                    time.sleep(2)
+                    st.rerun()
+                elif current_status == "running":
+                    st.info("⏳ Evaluation in progress... (refreshing every 2s)")
+                    time.sleep(2)
+                    st.rerun()
+                elif current_status == "complete":
+                    st.session_state.last_run_id = polling_run_id
+                    st.session_state.polling_run_id = None
+                    st.session_state.eval_complete_banner = True
+                    st.rerun()
+                elif current_status == "failed":
+                    error_msg = status_data.get("error_message", "Unknown error")
+                    st.session_state.polling_run_id = None
+                    st.error(f"❌ Evaluation failed: {error_msg}")
+        except requests.exceptions.ConnectionError:
+            st.error("Cannot reach backend. Is the FastAPI server running?")
+
+    # Persistent completion banner — stays until user starts a new run
+    if st.session_state.eval_complete_banner:
+        st.success(
+            "✅ **Evaluation complete!** Switch to the **📊 Results** tab to view scores and verdict.",
+            icon="🎉",
+        )
+        if st.button("Clear notification", key="clear_banner"):
+            st.session_state.eval_complete_banner = False
+            st.rerun()
 
     if st.button("▶️ Start Evaluation", disabled=not all_ready, type="primary"):
         api_keys = {"openai_api_key": openai_key}
@@ -411,25 +539,28 @@ with tab_run:
             "custom_label": run_label or None,
         }
 
-        with st.spinner("Running evaluation..."):
-            try:
-                resp = requests.post(f"{BACKEND_URL}/eval/run", json=payload, timeout=120)
-                if resp.status_code == 200:
-                    run_id = resp.json()["run_id"]
-                    st.session_state.last_run_id = run_id
-                    st.success(f"Evaluation complete! Run ID: `{run_id}`")
-                    st.info("Switch to the **Results** tab to view scores and verdict.")
-                else:
-                    st.error(f"Eval failed: {resp.json()}")
-            except requests.exceptions.ConnectionError:
-                st.error("Cannot reach backend. Is the FastAPI server running?")
+        try:
+            resp = requests.post(f"{BACKEND_URL}/eval/run", json=payload, timeout=30)
+            if resp.status_code == 200:
+                run_id = resp.json()["run_id"]
+                st.session_state.polling_run_id = run_id
+                st.session_state.eval_complete_banner = False  # clear previous completion notice
+                st.rerun()
+            else:
+                try:
+                    error_detail = resp.json()
+                except Exception:
+                    error_detail = resp.text or f"HTTP {resp.status_code} (empty response)"
+                st.error(f"Eval failed to start: {error_detail}")
+        except requests.exceptions.ConnectionError:
+            st.error("Cannot reach backend. Is the FastAPI server running?")
 
     if not all_ready:
         st.caption("Complete the steps above to enable the run button.")
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# TAB 5 — Results (placeholder — full implementation in Sessions 4-6)
+# TAB 5 — Results
 # ──────────────────────────────────────────────────────────────────────────
 
 with tab_results:

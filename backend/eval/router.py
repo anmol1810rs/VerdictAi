@@ -1,12 +1,14 @@
 """
-eval/router.py — Session 2 endpoints (Stories 1.4, 1.5, 1.6).
+eval/router.py — Session 1-3 endpoints.
 
 Implements:
   POST /upload                  — parse CSV/JSONL/ZIP, validate fully (S1.6), return modality (S1.5)
   GET  /models/compatible       — return compatible/incompatible models for a modality (S1.5)
   POST /rubric/validate         — validate rubric weights
   POST /keys/validate           — validate API key format
-  POST /eval/run                — create run, execute mock judge, persist to DB
+  POST /eval/run                — create run immediately with status=pending, execute via BackgroundTask (S1.7)
+  GET  /eval/history            — list all runs ordered by recency with filters (S1.8)
+  GET  /eval/{run_id}/status    — poll run status (S1.7)
   GET  /eval/{run_id}/results   — fetch stored results
 """
 import csv
@@ -17,17 +19,20 @@ import zipfile
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from backend.config import DEV_MODE, MAX_PROMPTS, MIN_PROMPTS, MODELS_CONFIG
-from backend.db.database import get_db
+from backend.db.database import SessionLocal, get_db
 from backend.db.models import EvalRun, ModelResult, Prompt, Verdict
 from backend.eval.schemas import (
     APIKeys,
+    EvalHistoryItem,
+    EvalHistoryResponse,
     EvalResultsResponse,
     EvalRunRequest,
     EvalRunResponse,
+    EvalStatusResponse,
     IncompatibleModel,
     KeyValidationResponse,
     ModelResultOut,
@@ -229,6 +234,105 @@ def _make_validation_summary(
     )
 
 
+def _format_run_datetime(dt: Optional[datetime]) -> str:
+    """Format datetime as '07 Apr 2026, 8:00pm' (cross-platform)."""
+    if not dt:
+        return ""
+    hour = dt.hour
+    minute = dt.strftime("%M")
+    ampm = "am" if hour < 12 else "pm"
+    hour_12 = hour % 12 or 12
+    return dt.strftime(f"%d %b %Y, {hour_12}:{minute}{ampm}")
+
+
+# ── Story 1.7 — Background eval execution ──────────────────────────────────
+
+
+def _execute_eval(run_id: str, request: EvalRunRequest) -> None:
+    """
+    Background task: executes the eval and updates run status.
+    Creates its own DB session — request session is already closed by this point.
+    Status flow: pending → running → complete (or failed on exception).
+    """
+    db = SessionLocal()
+    run = None
+    try:
+        run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
+        if not run:
+            return  # Should never happen
+
+        run.status = "running"
+        db.commit()
+
+        rubric = request.rubric.model_dump()
+        prompt_records = db.query(Prompt).filter(Prompt.eval_run_id == run_id).all()
+
+        if DEV_MODE:
+            for idx, prompt_rec in enumerate(prompt_records):
+                for model_id in request.models_selected:
+                    response_text = get_mock_response(model_id)
+                    judge_out = get_mock_judge_scores()
+                    scores = judge_out["scores"]
+                    reasoning = judge_out["reasoning"]
+
+                    tokens = {"input": 120, "output": 85}
+                    cost_usd = calculate_mock_cost(model_id, tokens)
+                    weighted_score = sum(
+                        scores.get(dim, 0) * (rubric.get(dim, 0) / 100)
+                        for dim in ["accuracy", "hallucination", "instruction_following", "conciseness"]
+                    )
+                    cost_efficiency = calculate_cost_efficiency(cost_usd, weighted_score)
+                    all_scores = {**scores, "cost_efficiency": cost_efficiency}
+                    hallucination_flagged = scores.get("hallucination", 10) >= 7
+
+                    result = ModelResult(
+                        id=str(uuid.uuid4()),
+                        eval_run_id=run_id,
+                        prompt_id=prompt_rec.id,
+                        prompt_index=str(idx),
+                        model_name=model_id,
+                        response_text=response_text,
+                        dimension_scores=all_scores,
+                        dimension_reasoning=reasoning,
+                        hallucination_flagged=hallucination_flagged,
+                        hallucination_reason=reasoning.get("hallucination") if hallucination_flagged else None,
+                        tokens_used=tokens,
+                        cost_usd=cost_usd,
+                    )
+                    db.add(result)
+
+            db.commit()
+
+            winning_model = request.models_selected[0]
+            verdict = Verdict(
+                id=str(uuid.uuid4()),
+                eval_run_id=run_id,
+                winning_model=winning_model,
+                summary=(
+                    f"[DEV MODE] Based on mock evaluation scores, {winning_model} is the "
+                    f"recommended model. Real verdict generation with reasoning is implemented "
+                    f"in Session 4."
+                ),
+                score_breakdown={},
+                cost_comparison={},
+                hallucination_warnings=[],
+            )
+            db.add(verdict)
+
+        run.status = "complete"
+        run.completed_at = datetime.now(timezone.utc)
+        db.commit()
+
+    except Exception as exc:  # noqa: BLE001
+        if run:
+            run.status = "failed"
+            run.error_message = str(exc)[:500]
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+    finally:
+        db.close()
+
+
 # ── Story 1.6 — Upload with Full Validation ────────────────────────────────
 
 
@@ -372,116 +476,143 @@ def validate_rubric(rubric: RubricWeights):
     return rubric
 
 
-# ── Eval run ───────────────────────────────────────────────────────────────
+# ── Story 1.7 — Eval run with background execution ────────────────────────
+
+# NOTE: /eval/history MUST be defined before /eval/{run_id}/... routes.
+# FastAPI matches static paths before path parameters, but being explicit is safer.
 
 
 @router.post("/eval/run", response_model=EvalRunResponse)
-def start_eval_run(request: EvalRunRequest, db: Session = Depends(get_db)):
+def start_eval_run(
+    request: EvalRunRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     """
-    Create an eval run and execute it synchronously in DEV_MODE (mock judge).
-    API keys are used in-memory only — never written to the database.
+    Create an eval run immediately with status=pending, then execute via BackgroundTask.
+    Returns run_id + status=pending before any model call happens.
     """
     run_id = str(uuid.uuid4())
 
-    # Use modality from request (client provides it from upload response)
-    # Fallback: detect from prompts (for Session 1 backward compat)
-    modality = "text"  # will be overridden by client, this is just default
+    # Collect unique engineer names from prompt-level data
+    engineer_names = list({p.engineer_name for p in request.prompts if p.engineer_name})
 
-    # Persist run metadata — NOTE: no API key fields in EvalRun model
+    # Persist run with status=pending — this is the immediate commit
     run = EvalRun(
         id=run_id,
         created_at=datetime.now(timezone.utc),
-        modality=modality,
+        modality="text",  # client provides modality; default text for backward compat
         rubric_config=request.rubric.model_dump(),
         models_selected=request.models_selected,
         engineer_name=request.engineer_name,
+        engineer_names=engineer_names or None,
         status="pending",
         custom_label=request.custom_label,
     )
     db.add(run)
     db.commit()
 
-    # Persist prompts (Story 1.4: engineer_name saved here)
-    prompt_records: list[Prompt] = []
+    # Persist prompts
     for p in request.prompts:
         prompt_rec = Prompt(
             id=str(uuid.uuid4()),
             eval_run_id=run_id,
             prompt_text=p.prompt,
             expected_output=p.expected_output,
-            engineer_name=p.engineer_name,  # Story 1.4: engineer tagging saved
+            engineer_name=p.engineer_name,
         )
         db.add(prompt_rec)
-        prompt_records.append(prompt_rec)
     db.commit()
 
-    if DEV_MODE:
-        run.status = "running"
-        db.commit()
+    # Schedule eval execution as background task — returns immediately
+    background_tasks.add_task(_execute_eval, run_id, request)
 
-        rubric = request.rubric.model_dump()
+    return EvalRunResponse(run_id=run_id, status="pending")
 
-        for idx, prompt_rec in enumerate(prompt_records):
-            for model_id in request.models_selected:
-                # Mock model response (no real API call)
-                response_text = get_mock_response(model_id)
 
-                # Mock judge scores (no real API call)
-                judge_out = get_mock_judge_scores()
-                scores = judge_out["scores"]
-                reasoning = judge_out["reasoning"]
+# ── Story 1.8 — Run history (static route BEFORE dynamic {run_id} routes) ─
 
-                # Calculate cost_efficiency (auto — not judge-scored)
-                tokens = {"input": 120, "output": 85}
-                cost_usd = calculate_mock_cost(model_id, tokens)
-                weighted_score = sum(
-                    scores.get(dim, 0) * (rubric.get(dim, 0) / 100)
-                    for dim in ["accuracy", "hallucination", "instruction_following", "conciseness"]
-                )
-                cost_efficiency = calculate_cost_efficiency(cost_usd, weighted_score)
 
-                all_scores = {**scores, "cost_efficiency": cost_efficiency}
-                hallucination_flagged = scores.get("hallucination", 10) >= 7
+@router.get("/eval/history", response_model=EvalHistoryResponse)
+def get_eval_history(
+    model: Optional[str] = None,
+    engineer: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Return all eval runs ordered most-recent first.
+    Filters: model (string match in models_selected JSON),
+             engineer (case-insensitive match in engineer_names JSON),
+             date_from / date_to (ISO date strings YYYY-MM-DD).
+    """
+    query = db.query(EvalRun).order_by(EvalRun.created_at.desc())
 
-                result = ModelResult(
-                    id=str(uuid.uuid4()),
-                    eval_run_id=run_id,
-                    prompt_id=prompt_rec.id,
-                    prompt_index=str(idx),
-                    model_name=model_id,
-                    response_text=response_text,
-                    dimension_scores=all_scores,
-                    dimension_reasoning=reasoning,
-                    hallucination_flagged=hallucination_flagged,
-                    hallucination_reason=reasoning.get("hallucination") if hallucination_flagged else None,
-                    tokens_used=tokens,
-                    cost_usd=cost_usd,
-                )
-                db.add(result)
+    # Date filters — applied in SQL
+    if date_from:
+        try:
+            dt_from = datetime.fromisoformat(date_from)
+            query = query.filter(EvalRun.created_at >= dt_from)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            dt_to = datetime.fromisoformat(date_to)
+            query = query.filter(EvalRun.created_at <= dt_to)
+        except ValueError:
+            pass
 
-        db.commit()
+    runs = query.all()
 
-        # Generate minimal verdict (full verdict logic is Session 4)
-        winning_model = request.models_selected[0]
-        verdict = Verdict(
-            id=str(uuid.uuid4()),
-            eval_run_id=run_id,
-            winning_model=winning_model,
-            summary=(
-                f"[DEV MODE] Based on mock evaluation scores, {winning_model} is the "
-                f"recommended model. Real verdict generation with reasoning is implemented "
-                f"in Session 4."
-            ),
-            score_breakdown={},
-            cost_comparison={},
-            hallucination_warnings=[],
-        )
-        db.add(verdict)
+    # Model + engineer filters — applied in Python (SQLite JSON support is limited)
+    if model:
+        runs = [r for r in runs if model in (r.models_selected or [])]
+    if engineer:
+        runs = [
+            r for r in runs
+            if any(engineer.lower() in (e or "").lower() for e in (r.engineer_names or []))
+        ]
 
-        run.status = "complete"
-        db.commit()
+    # Build history items — join with verdicts for winning model
+    items: list[EvalHistoryItem] = []
+    for run in runs:
+        verdict = db.query(Verdict).filter(Verdict.eval_run_id == run.id).first()
+        items.append(EvalHistoryItem(
+            id=run.id,
+            created_at=_format_run_datetime(run.created_at),
+            modality=run.modality,
+            models_selected=run.models_selected or [],
+            engineer_names=run.engineer_names or [],
+            run_label=run.custom_label,
+            status=run.status,
+            error_message=run.error_message,
+            winning_model=verdict.winning_model if verdict else None,
+            overall_score=None,  # full scoring in Session 4
+        ))
 
-    return EvalRunResponse(run_id=run_id, status=run.status)
+    return EvalHistoryResponse(runs=items, total=len(items))
+
+
+# ── Story 1.7 — Status polling ─────────────────────────────────────────────
+
+
+@router.get("/eval/{run_id}/status", response_model=EvalStatusResponse)
+def get_eval_status(run_id: str, db: Session = Depends(get_db)):
+    """Poll the current status of an eval run. Used by frontend every 2s while running."""
+    run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Eval run '{run_id}' not found.")
+
+    return EvalStatusResponse(
+        run_id=run_id,
+        status=run.status,
+        error_message=run.error_message,
+        completed_at=run.completed_at.isoformat() if run.completed_at else None,
+    )
+
+
+# ── Eval results ───────────────────────────────────────────────────────────
 
 
 @router.get("/eval/{run_id}/results", response_model=EvalResultsResponse)
