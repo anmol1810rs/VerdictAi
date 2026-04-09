@@ -10,12 +10,19 @@ class PromptInput(BaseModel):
     engineer_name: Optional[str] = None
 
 
+class ValidationWarning(BaseModel):
+    field: str
+    message: str
+
+
 class UploadResponse(BaseModel):
     prompt_count: int
     has_ground_truth: bool
     has_engineer_names: bool
     modality: str
     prompts: list[PromptInput]
+    warnings: list[ValidationWarning] = []
+    validation_summary: Optional[str] = None
 
 
 # ── API Keys ───────────────────────────────────────────────────────────────
@@ -120,3 +127,17 @@ class EvalResultsResponse(BaseModel):
     status: str
     results: list[ModelResultOut]
     verdict: Optional[dict] = None
+
+
+# ── Modality & Models ───────────────────────────────────────────────────────
+
+class IncompatibleModel(BaseModel):
+    model: str
+    reason: str
+
+
+class ModelsCompatibleResponse(BaseModel):
+    modality: str
+    compatible_models: list[dict]
+    incompatible_models: list[IncompatibleModel]
+    suggestions: dict
