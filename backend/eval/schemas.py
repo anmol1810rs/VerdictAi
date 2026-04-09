@@ -129,6 +129,35 @@ class EvalResultsResponse(BaseModel):
     verdict: Optional[dict] = None
 
 
+# ── Story 1.7 — Status polling ─────────────────────────────────────────────
+
+class EvalStatusResponse(BaseModel):
+    run_id: str
+    status: str                          # pending | running | complete | failed
+    error_message: Optional[str] = None
+    completed_at: Optional[str] = None  # ISO string, set on complete/failed
+
+
+# ── Story 1.8 — Run history ────────────────────────────────────────────────
+
+class EvalHistoryItem(BaseModel):
+    id: str
+    created_at: str                      # formatted: "07 Apr 2026, 8:00pm"
+    modality: str
+    models_selected: list[str]
+    engineer_names: list[str]
+    run_label: Optional[str] = None
+    status: str
+    error_message: Optional[str] = None
+    winning_model: Optional[str] = None
+    overall_score: Optional[float] = None  # full scoring in Session 4
+
+
+class EvalHistoryResponse(BaseModel):
+    runs: list[EvalHistoryItem]
+    total: int
+
+
 # ── Modality & Models ───────────────────────────────────────────────────────
 
 class IncompatibleModel(BaseModel):

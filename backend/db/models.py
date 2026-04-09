@@ -18,9 +18,12 @@ class EvalRun(Base):
     modality = Column(String, nullable=False)
     rubric_config = Column(JSON, nullable=False)
     models_selected = Column(JSON, nullable=False)
-    engineer_name = Column(String, nullable=True)
+    engineer_name = Column(String, nullable=True)   # per-run override (Run tab field)
+    engineer_names = Column(JSON, nullable=True)    # JSON list — unique names from all prompts
     status = Column(String, nullable=False, default="pending")
     custom_label = Column(String, nullable=True)
+    error_message = Column(String, nullable=True)   # set on status=failed
+    completed_at = Column(DateTime, nullable=True)  # set on status=complete or failed
     # NOTE: API keys are NEVER stored — only kept in request memory
 
 

@@ -150,3 +150,63 @@
 - Nested folder support in ZIP (images/ folder not required, search recursively)
 
 **Next session:** Session 3 — Persistence & Run History (Stories 1.7, 1.8)
+
+---
+
+## Session 3 — 2026-04-09
+
+**Stories:** 1.7 (Eval Run Persistence), 1.8 (Run History Sidebar)
+
+**Completed:**
+
+**Story 1.7 — Eval Run Persistence**
+- `POST /eval/run` now returns immediately with `status=pending` — run row is committed to SQLite before any model call happens
+- Eval execution moved to `_execute_eval()` background function, invoked via FastAPI `BackgroundTasks`
+- Status flow: pending → running → complete (or failed on exception)
+- New `GET /eval/{run_id}/status` endpoint — returns `{run_id, status, error_message, completed_at}`
+- `error_message` (String) and `completed_at` (DateTime) added to `EvalRun` ORM model
+- `engineer_names` (JSON list) added to `EvalRun` — populated from unique per-prompt engineer names at run creation
+- Failed runs: background task catches all exceptions, saves `error_message[:500]` and `status=failed`
+- Page refresh: re-fetching `/eval/{id}/status` always returns current DB state — no client-side reset
+- Frontend: Run tab polls `/eval/{id}/status` every 2s via `time.sleep(2) + st.rerun()` while status is pending/running
+- Run label: `custom_label` from Story 1.4 wired correctly to eval_runs table
+
+**Story 1.8 — Run History Sidebar**
+- New `GET /eval/history` endpoint — returns all runs ordered by `created_at DESC`
+- Filter parameters: `model` (string match in `models_selected` JSON), `engineer` (case-insensitive match in `engineer_names` JSON), `date_from` / `date_to` (ISO date strings)
+- JSON field filtering done in Python (SQLite JSON function support is limited)
+- Each history item includes: id, created_at (formatted "07 Apr 2026, 8:00pm"), modality, models_selected, engineer_names, run_label, status, error_message, winning_model
+- Empty state: endpoint returns `{runs: [], total: 0}` when no runs exist (no error)
+- Frontend sidebar: added Run History section below API keys with expandable filter bar
+- Filter bar: model text input, engineer text input, date from/to date pickers, clear filters button
+- Each run rendered as a clickable button showing status icon + label
+- Clicking a completed run sets `last_run_id` in session_state → Results tab loads that run
+- Sidebar auto-refreshes on every Streamlit rerun (triggered by polling loop or user action)
+- Modality icons: 📄 text, 🖼️ image_text, 📊 structured_data
+- Status icons: ✅ complete, ⏳ running, ❌ failed, 🔄 pending
+
+**Schema additions**
+- `backend/eval/schemas.py`: Added `EvalStatusResponse`, `EvalHistoryItem`, `EvalHistoryResponse`
+- `backend/db/models.py`: Added `error_message`, `completed_at`, `engineer_names` to `EvalRun`
+
+**Tests — 88/88 passing**
+- `backend/tests/test_session_3.py` — 13 new tests:
+  - Story 1.7 (7 tests): immediate pending creation, running/complete/failed status transitions, page refresh stability, run label persistence, auto-save
+  - Story 1.8 (6 tests): empty state (isolated in-memory DB), ordering by recency, model filter, engineer filter, results load, failed run in history
+- Sessions 1 + 2 fully backward compatible: 75 prior tests still passing
+
+**Key Decisions Made This Session**
+- BackgroundTasks (not asyncio.create_task): simpler, no async context issues, native to FastAPI, sufficient for MVP
+- Static route `/eval/history` defined BEFORE dynamic `/eval/{run_id}/...` routes to prevent path parameter shadowing
+- `StaticPool` required for in-memory SQLite test engine so all connections share the same database instance
+- `engineer_names` stored as JSON list in EvalRun (not joined from prompts table) for efficient history filtering without joins
+- datetime formatting is cross-platform (no `%-I` Linux-only flag): hour formatted manually in Python
+- Programmatic Streamlit tab switching not supported — clicking a history run sets session_state.last_run_id and shows "Switch to Results tab" message
+
+**Ideas for v1.1 (do not build)**
+- Real-time run progress via SSE (per-prompt status updates while eval runs)
+- Pagination for run history (currently returns all runs)
+- Run comparison view — select two history entries side by side
+- Export run history to CSV
+
+**Next session:** Session 4 — Scoring UI & Verdict Display
