@@ -48,6 +48,8 @@ if "uploaded_prompts" not in st.session_state:
     st.session_state.uploaded_prompts = None
 if "upload_meta" not in st.session_state:
     st.session_state.upload_meta = None
+if "detected_modality" not in st.session_state:
+    st.session_state.detected_modality = "text"
 if "rubric" not in st.session_state:
     st.session_state.rubric = None
 if "last_run_id" not in st.session_state:
@@ -60,7 +62,6 @@ if "last_run_id" not in st.session_state:
 # ══════════════════════════════════════════════════════════════════════════
 
 with st.sidebar:
-    st.image("https://img.shields.io/badge/VerdictAI-⚖️-blue", use_column_width=False)
     st.title("⚖️ VerdictAI")
     st.caption("Run structured LLM evaluations in minutes.")
     st.divider()
@@ -122,7 +123,7 @@ tab_upload, tab_rubric, tab_models, tab_run, tab_results = st.tabs([
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# TAB 1 — Upload Dataset (Story 1.1)
+# TAB 1 — Upload Dataset (Story 1.1 + 1.6)
 # ──────────────────────────────────────────────────────────────────────────
 
 with tab_upload:
@@ -175,16 +176,20 @@ with tab_upload:
                     meta = response.json()
                     st.session_state.upload_meta = meta
                     st.session_state.uploaded_prompts = meta["prompts"]
+                    st.session_state.detected_modality = meta.get("modality", "text")
 
-                    st.success(
-                        f"Dataset validated ✓ — **{meta['prompt_count']} prompts** detected "
-                        f"| Modality: **{meta['modality']}** "
-                        f"| Ground truth: {'✓' if meta['has_ground_truth'] else '✗'} "
-                        f"| Engineer names: {'✓' if meta['has_engineer_names'] else '✗'}"
-                    )
+                    # Show success + summary
+                    st.success(f"✓ {meta.get('validation_summary', 'Dataset validated')}")
+
+                    # Show warnings if any
+                    if meta.get("warnings"):
+                        with st.expander("⚠️ Warnings (non-blocking)"):
+                            for warn in meta["warnings"]:
+                                st.warning(f"**{warn['field']}:** {warn['message']}")
+
                 else:
                     detail = response.json().get("detail", "Unknown error")
-                    st.error(f"Validation failed: {detail}")
+                    st.error(f"❌ Validation failed: {detail}")
             except requests.exceptions.ConnectionError:
                 st.error("Cannot reach backend. Make sure the FastAPI server is running on port 8000.")
 
@@ -274,49 +279,73 @@ with tab_rubric:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# TAB 3 — Model Selection
+# TAB 3 — Model Selection (Story 1.5: modality filtering)
 # ──────────────────────────────────────────────────────────────────────────
 
 with tab_models:
     st.header("Select Models to Compare")
-    st.caption("Choose 2–3 models. Only models compatible with your dataset's modality are shown.")
+    st.caption("Compatible models shown based on your dataset's modality.")
+
+    # Get detected modality from session state (from upload)
+    detected_modality = st.session_state.get("detected_modality", "text")
 
     if st.session_state.upload_meta:
-        modality = st.session_state.upload_meta.get("modality", "text")
+        st.info(f"📊 **Detected modality:** {detected_modality}")
+
+        # Fetch compatible models from backend
+        with st.spinner("Loading compatible models..."):
+            try:
+                compat_resp = requests.get(
+                    f"{BACKEND_URL}/models/compatible",
+                    params={"modality": detected_modality},
+                    timeout=10,
+                )
+                if compat_resp.status_code == 200:
+                    compat_data = compat_resp.json()
+                    compatible_ids = [m["id"] for m in compat_data["compatible_models"]]
+                    incompatible_list = compat_data.get("incompatible_models", [])
+                    suggestions = compat_data.get("suggestions", {})
+
+                    # Show compatible models as checkboxes
+                    st.subheader("✅ Compatible Models")
+                    selected_models = []
+                    cols = st.columns(2)
+                    for i, model in enumerate(compat_data["compatible_models"]):
+                        with cols[i % 2]:
+                            checked = st.checkbox(
+                                f"🤖 **{model['display_name']}**",
+                                key=f"model_{model['id']}",
+                                help=f"{model.get('description', '')} ({model['provider']})",
+                            )
+                            if checked:
+                                selected_models.append(model["id"])
+
+                    # Show incompatible with warnings + suggestions
+                    if incompatible_list:
+                        st.subheader("❌ Incompatible Models")
+                        for inc in incompatible_list:
+                            suggestion = suggestions.get(inc["model"], {})
+                            if suggestion:
+                                st.warning(f"**{inc['model']}**: {inc['reason']} → "
+                                          f"Switch to **{suggestion.get('suggest')}**?")
+                            else:
+                                st.info(f"**{inc['model']}**: {inc['reason']}")
+
+                    if selected_models:
+                        if len(selected_models) > 3:
+                            st.warning("Select at most 3 models for comparison.")
+                        else:
+                            st.success(f"Selected: {', '.join(selected_models)}")
+                        st.session_state.selected_models = selected_models
+                    else:
+                        st.info("Select 2–3 models to continue.")
+
+                else:
+                    st.error(f"Error loading models: {compat_resp.json()}")
+            except requests.exceptions.ConnectionError:
+                st.error("Cannot reach backend to fetch compatible models.")
     else:
-        modality = "text"
-
-    # Filter models based on modality
-    compatible_models = []
-    for m in MVP_MODELS:
-        if modality == "image_text" and not m.get("supports_image", False):
-            continue
-        compatible_models.append(m)
-
-    selected_models = []
-    cols = st.columns(3)
-    for i, model in enumerate(compatible_models):
-        with cols[i % 3]:
-            checked = st.checkbox(
-                f"**{model['display_name']}**",
-                key=f"model_{model['id']}",
-                help=f"Badge: {model.get('badge', '')} | Provider: {model['provider']}",
-            )
-            if checked:
-                selected_models.append(model["id"])
-            # Show incompatibility warning
-            if modality == "image_text" and not model.get("supports_image", True):
-                st.warning(f"{model['display_name']} does not support image inputs.")
-
-    if selected_models:
-        if len(selected_models) > 3:
-            st.warning("Select at most 3 models for comparison.")
-        else:
-            st.success(f"Selected: {', '.join(selected_models)}")
-        st.session_state.selected_models = selected_models
-    else:
-        st.info("Select 2–3 models to continue.")
-        st.session_state.selected_models = []
+        st.info("Upload a dataset first to see compatible models.")
 
     # Free tier note
     st.divider()
@@ -348,15 +377,20 @@ with tab_run:
         icon = "✅" if passed else "❌"
         st.markdown(f"{icon} {label}")
 
+    st.divider()
+
+    # Story 1.4 — Engineer name (per-prompt, from upload) + Run label (optional, per-run)
     engineer_name = st.text_input(
         "Prompt engineer name (optional)",
         placeholder="e.g. Alice",
-        help="Tag this run to a team member. Free-text, no auth required.",
+        help="This tags ALL prompts in this batch to a team member. (Optional)",
     )
-    custom_label = st.text_input(
+
+    run_label = st.text_input(
         "Run label (optional)",
-        placeholder="e.g. Sprint 12 eval",
-        help="Add a descriptive label to this run for easy identification later.",
+        placeholder="e.g. Sprint 4 QA or April batch 1",
+        help="Add a descriptive label to identify this evaluation run later.",
+        key="run_label_input",
     )
 
     all_ready = all(checks.values())
@@ -374,7 +408,7 @@ with tab_run:
             "rubric": rubric,
             "api_keys": api_keys,
             "engineer_name": engineer_name or None,
-            "custom_label": custom_label or None,
+            "custom_label": run_label or None,
         }
 
         with st.spinner("Running evaluation..."):

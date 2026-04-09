@@ -75,3 +75,78 @@
 - Upload template auto-detection based on column names
 
 **Next session:** Session 2 — Modality Detection & Validation (Stories 1.4, 1.5, 1.6)
+
+---
+
+## Session 2 — 2026-04-06
+
+**Stories:** 1.4 (Engineer Tagging), 1.5 (Modality Detection), 1.6 (Upload Validation)
+
+**Completed:**
+
+**Story 1.6 — Full Upload Validation**
+- Enhanced `POST /upload` with comprehensive validation
+- ZIP image file checking: validates manifest.json exists, all referenced images exist, file types are jpg/jpeg/png/webp only
+- Specific, actionable error messages per issue (not generic)
+- Warnings for missing optional fields (expected_output, engineer_name) — non-blocking
+- Validation summary after passing: "✓ 10 prompts · Modality: text · Ground truth: 10/10 · Engineers: 3"
+- Modality detection from file type: CSV/JSONL→"text", ZIP→"image_text", JSONL with data field→"structured_data"
+- Added `ValidationWarning` schema to track non-blocking warnings
+
+**Story 1.5 — Modality Detection & Model Filtering**
+- New endpoint: `GET /models/compatible?modality={text|image_text|structured_data|video|audio}`
+- Reads `modality_matrix` and `platform_suggestions` from `models.yaml` (no hardcoded model names)
+- Returns: compatible_models (full details), incompatible_models (with reasons), suggestions (alternatives)
+- Streamlit UI updated: calls `/models/compatible` after upload, filters model checkboxes based on modality, shows inline warnings if incompatible selected
+- Claude Haiku 4.5 hidden for image_text (does not support images)
+- Auto-suggestions work from models.yaml (e.g., "Switch to Claude Sonnet 4.6?" for Haiku on image data)
+- Video/audio shown as "Coming in v1.1" disabled state
+
+**Story 1.4 — Engineer Tagging & Run Label**
+- Engineer names parsed from upload are saved to `prompts` table in SQLite (already working from Session 1)
+- Added "Run label" optional text input field in Run tab (per-run, like custom_label)
+- Run label saved with eval run to SQLite
+- Engineer names and run labels are orthogonal: engineer_name is per-prompt, run label is per-evaluation batch
+- Prompts grouped by engineer_name in results (preparation; full grouping UI in Sessions 4+)
+
+**Backend Enhancements**
+- `backend/eval/schemas.py`: Added `ValidationWarning`, `IncompatibleModel`, `ModelsCompatibleResponse` schemas
+- `backend/eval/router.py`: Completely rewritten with Story 1.4/1.5/1.6 logic
+  - `_parse_zip()` now validates image files with specific error messages
+  - `_validate_modality_from_jsonl()` detects structured data
+  - `_rows_to_prompts()` returns (prompts, warnings) tuple
+  - `POST /upload` returns validation summary and warnings
+  - `GET /models/compatible` endpoint reads modality_matrix from models.yaml
+
+**Frontend Enhancements**
+- `frontend/app.py` updated:
+  - Upload tab: shows validation summary on success, expandable warnings section
+  - Models tab: calls `/models/compatible` endpoint, filters checkboxes based on detected modality, shows incompatible warnings with auto-suggestions
+  - Run tab: added "Run label" text input field (Story 1.4)
+  - Session state: added `detected_modality` to track modality from upload
+
+**Tests — 75/75 passing**
+- `backend/tests/test_session_2.py` — 26 new tests covering:
+  - Upload validation edge cases (missing columns, empty prompts, count limits)
+  - ZIP image validation (missing files, unsupported types, valid extensions)
+  - Modality detection (CSV→text, ZIP→image_text)
+  - Model compatibility filtering (text vs image_text)
+  - Suggestions for incompatible models
+  - Engineer name persistence
+  - Backward compatibility with Session 1
+
+**Key Decisions Made This Session**
+- ZIP manifest format: accept both list of dicts AND {prompts: [dicts]} for backward compat
+- Modality detection: filename-based for ZIP/CSV/JSONL, content-based for JSONL data field
+- Model filtering: done entirely in Streamlit via `/models/compatible` endpoint (no hardcoded names in any Python—all from models.yaml)
+- Engineer tagging: per-prompt name is separate from per-run label (both tracked, both exported later)
+- Warnings: non-blocking (render as st.warning() but let user proceed)
+
+**Ideas for v1.1 (do not build)**
+- Streaming upload validation with progress bar for large ZIPs
+- Batch image format conversion (auto-convert unsupported formats)
+- Engineer name autocomplete from previous runs
+- Modality confidence score (how confident is detection)
+- Nested folder support in ZIP (images/ folder not required, search recursively)
+
+**Next session:** Session 3 — Persistence & Run History (Stories 1.7, 1.8)
