@@ -8,6 +8,7 @@ class PromptInput(BaseModel):
     prompt: str
     expected_output: Optional[str] = None
     engineer_name: Optional[str] = None
+    image_data: Optional[str] = None  # base64 data URI for image_text modality
 
 
 class ValidationWarning(BaseModel):

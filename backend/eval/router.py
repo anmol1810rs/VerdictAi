@@ -1,5 +1,5 @@
 """
-eval/router.py — Session 1-3 endpoints.
+eval/router.py — Session 1-4 endpoints.
 
 Implements:
   POST /upload                  — parse CSV/JSONL/ZIP, validate fully (S1.6), return modality (S1.5)
@@ -11,9 +11,11 @@ Implements:
   GET  /eval/{run_id}/status    — poll run status (S1.7)
   GET  /eval/{run_id}/results   — fetch stored results
 """
+import asyncio
 import csv
 import io
 import json
+import logging
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -23,6 +25,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Up
 from sqlalchemy.orm import Session
 
 from backend.config import DEV_MODE, MAX_PROMPTS, MIN_PROMPTS, MODELS_CONFIG
+
+logger = logging.getLogger(__name__)
 from backend.db.database import SessionLocal, get_db
 from backend.db.models import EvalRun, ModelResult, Prompt, Verdict
 from backend.eval.schemas import (
@@ -88,8 +92,11 @@ def _parse_zip(content: bytes) -> tuple[list[dict], str, list[ValidationWarning]
     """
     Parse ZIP containing manifest.json + images folder.
     Returns (rows, modality, warnings).
-    Validates that all referenced image files exist and have valid extensions.
+    Validates all referenced image files exist, extracts bytes as base64 data URIs.
     """
+    import base64 as _base64
+
+    MIME_MAP = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
     warnings: list[ValidationWarning] = []
 
     with zipfile.ZipFile(io.BytesIO(content)) as z:
@@ -109,11 +116,10 @@ def _parse_zip(content: bytes) -> tuple[list[dict], str, list[ValidationWarning]
         manifest_data = json.loads(z.read(manifest_names[0]))
         rows = manifest_data if isinstance(manifest_data, list) else manifest_data.get("prompts", [])
 
-        # Validate image files if present
+        # Validate and extract image bytes into base64 data URIs
         for row in rows:
             if "image_path" in row and row["image_path"]:
                 image_path = row["image_path"]
-                # Check if file exists in ZIP
                 if image_path not in names:
                     raise HTTPException(
                         status_code=422,
@@ -123,7 +129,6 @@ def _parse_zip(content: bytes) -> tuple[list[dict], str, list[ValidationWarning]
                             f"referenced images are included."
                         ),
                     )
-                # Check file extension
                 ext = "." + image_path.split(".")[-1].lower() if "." in image_path else ""
                 if ext not in VALID_IMAGE_EXTENSIONS:
                     raise HTTPException(
@@ -133,6 +138,11 @@ def _parse_zip(content: bytes) -> tuple[list[dict], str, list[ValidationWarning]
                             f"Supported formats: jpg, jpeg, png, webp"
                         ),
                     )
+                # Extract bytes and encode as base64 data URI
+                image_bytes = z.read(image_path)
+                mime = MIME_MAP.get(ext, "image/jpeg")
+                b64 = _base64.b64encode(image_bytes).decode("utf-8")
+                row["image_data"] = f"data:{mime};base64,{b64}"
 
     return rows, "image_text", warnings
 
@@ -185,6 +195,7 @@ def _rows_to_prompts(rows: list[dict]) -> tuple[list[PromptInput], list[Validati
             prompt=str(row["prompt"]).strip(),
             expected_output=row.get("expected_output") or None,
             engineer_name=row.get("engineer_name") or None,
+            image_data=row.get("image_data") or None,
         ))
 
     return prompts, warnings
@@ -245,92 +256,263 @@ def _format_run_datetime(dt: Optional[datetime]) -> str:
     return dt.strftime(f"%d %b %Y, {hour_12}:{minute}{ampm}")
 
 
-# ── Story 1.7 — Background eval execution ──────────────────────────────────
+# ── Story 1.7/2.1/2.2 — Background eval execution ──────────────────────────
 
 
 def _execute_eval(run_id: str, request: EvalRunRequest) -> None:
     """
-    Background task: executes the eval and updates run status.
-    Creates its own DB session — request session is already closed by this point.
+    Background task: execute the eval and update run status.
+    Creates its own DB session — the request session is already closed.
     Status flow: pending → running → complete (or failed on exception).
+
+    DEV_MODE=true:  mock responses + mock judge scores (no API calls)
+    DEV_MODE=false: real runner (asyncio) + real judge + real verdict
     """
     db = SessionLocal()
     run = None
     try:
         run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
         if not run:
-            return  # Should never happen
+            return
 
         run.status = "running"
+        run.progress_pct = 0.0
         db.commit()
 
         rubric = request.rubric.model_dump()
         prompt_records = db.query(Prompt).filter(Prompt.eval_run_id == run_id).all()
 
         if DEV_MODE:
-            for idx, prompt_rec in enumerate(prompt_records):
-                for model_id in request.models_selected:
-                    response_text = get_mock_response(model_id)
-                    judge_out = get_mock_judge_scores()
-                    scores = judge_out["scores"]
-                    reasoning = judge_out["reasoning"]
-
-                    tokens = {"input": 120, "output": 85}
-                    cost_usd = calculate_mock_cost(model_id, tokens)
-                    weighted_score = sum(
-                        scores.get(dim, 0) * (rubric.get(dim, 0) / 100)
-                        for dim in ["accuracy", "hallucination", "instruction_following", "conciseness"]
-                    )
-                    cost_efficiency = calculate_cost_efficiency(cost_usd, weighted_score)
-                    all_scores = {**scores, "cost_efficiency": cost_efficiency}
-                    hallucination_flagged = scores.get("hallucination", 10) >= 7
-
-                    result = ModelResult(
-                        id=str(uuid.uuid4()),
-                        eval_run_id=run_id,
-                        prompt_id=prompt_rec.id,
-                        prompt_index=str(idx),
-                        model_name=model_id,
-                        response_text=response_text,
-                        dimension_scores=all_scores,
-                        dimension_reasoning=reasoning,
-                        hallucination_flagged=hallucination_flagged,
-                        hallucination_reason=reasoning.get("hallucination") if hallucination_flagged else None,
-                        tokens_used=tokens,
-                        cost_usd=cost_usd,
-                    )
-                    db.add(result)
-
-            db.commit()
-
-            winning_model = request.models_selected[0]
-            verdict = Verdict(
-                id=str(uuid.uuid4()),
-                eval_run_id=run_id,
-                winning_model=winning_model,
-                summary=(
-                    f"[DEV MODE] Based on mock evaluation scores, {winning_model} is the "
-                    f"recommended model. Real verdict generation with reasoning is implemented "
-                    f"in Session 4."
-                ),
-                score_breakdown={},
-                cost_comparison={},
-                hallucination_warnings=[],
-            )
-            db.add(verdict)
+            _run_mock_eval(run_id, request, prompt_records, rubric, db)
+        else:
+            # Real async path — close this session first; runner opens its own
+            db.close()
+            db = None
+            run = None
+            asyncio.run(_run_real_eval_async(run_id, request))
+            return  # async function manages all status transitions
 
         run.status = "complete"
         run.completed_at = datetime.now(timezone.utc)
+        run.progress_pct = 100.0
         db.commit()
 
     except Exception as exc:  # noqa: BLE001
-        if run:
+        if run and db:
             run.status = "failed"
             run.error_message = str(exc)[:500]
             run.completed_at = datetime.now(timezone.utc)
             db.commit()
     finally:
-        db.close()
+        if db:
+            db.close()
+
+
+def _run_mock_eval(
+    run_id: str,
+    request: EvalRunRequest,
+    prompt_records: list,
+    rubric: dict,
+    db,
+) -> None:
+    """
+    DEV_MODE mock execution path.
+    Uses mock responses and judge scores from models.yaml.
+    Full verdict generation runs through real verdict.py logic.
+    """
+    from backend.verdict.verdict import generate_verdict
+
+    scored_results: list[dict] = []
+
+    for idx, prompt_rec in enumerate(prompt_records):
+        for model_id in request.models_selected:
+            response_text = get_mock_response(model_id)
+            judge_out = get_mock_judge_scores()
+            scores = judge_out["scores"]
+            reasoning = judge_out["reasoning"]
+
+            tokens_in, tokens_out = 120, 85
+            tokens = {"input": tokens_in, "output": tokens_out}
+            cost_usd = calculate_mock_cost(model_id, tokens)
+
+            # Session 4 semantics: hallucination 10=good, 0=bad; flagged when <= 3
+            hallucination_flagged = scores.get("hallucination", 10) <= 3
+            hallucination_reason = reasoning.get("hallucination") if hallucination_flagged else None
+
+            # cost_efficiency is auto-calculated in verdict.py — keep it out of dim_scores
+            dim_scores = {k: v for k, v in scores.items() if k != "cost_efficiency"}
+
+            result = ModelResult(
+                id=str(uuid.uuid4()),
+                eval_run_id=run_id,
+                prompt_id=prompt_rec.id,
+                prompt_index=str(idx),
+                model_name=model_id,
+                response_text=response_text,
+                dimension_scores=dim_scores,
+                dimension_reasoning=reasoning,
+                hallucination_flagged=hallucination_flagged,
+                hallucination_reason=hallucination_reason,
+                tokens_used=tokens,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cost_usd=cost_usd,
+            )
+            db.add(result)
+
+            scored_results.append({
+                "model_id": model_id,
+                "prompt_id": prompt_rec.id,
+                "prompt_index": idx,
+                "prompt_text": prompt_rec.prompt_text,
+                "expected_output": prompt_rec.expected_output,
+                "response_text": response_text,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cost_usd": cost_usd,
+                "scores": dim_scores,
+                "reasoning": reasoning,
+                "evidence": {k: "[MOCK]" for k in dim_scores},
+                "hallucination_flagged": hallucination_flagged,
+                "hallucination_reason": hallucination_reason,
+                "error": None,
+            })
+
+    db.commit()
+
+    # Use real verdict generation so scoring logic is exercised even in dev mode
+    generate_verdict(run_id, scored_results, rubric, db)
+
+
+async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
+    """
+    DEV_MODE=false async execution path.
+    Runs runner → judge → verdict → saves all results.
+    Manages its own DB session.
+    """
+    from backend.runner.runner import run_models_parallel
+    from backend.judge.judge import score_responses_parallel
+    from backend.verdict.verdict import generate_verdict
+
+    db = SessionLocal()
+    run = None
+    try:
+        run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
+        if not run:
+            logger.error("[run=%s] EvalRun not found in DB", run_id)
+            return
+
+        prompt_records = db.query(Prompt).filter(Prompt.eval_run_id == run_id).all()
+        logger.info(
+            "[run=%s] Starting real eval — models=%s prompts=%d",
+            run_id, request.models_selected, len(prompt_records),
+        )
+
+        prompts_data = [
+            {
+                "prompt_id": p.id,
+                "prompt_text": p.prompt_text,
+                "image_data": p.image_data,
+                "expected_output": p.expected_output,
+                "prompt_index": i,
+            }
+            for i, p in enumerate(prompt_records)
+        ]
+
+        api_keys = request.api_keys.model_dump()
+        rubric = request.rubric.model_dump()
+
+        openai_key = api_keys.get("openai_api_key", "")
+        logger.info(
+            "[run=%s] API key present: openai=%s anthropic=%s google=%s",
+            run_id,
+            bool(openai_key and openai_key.strip()),
+            bool(api_keys.get("anthropic_api_key")),
+            bool(api_keys.get("google_api_key")),
+        )
+
+        # Step 1 — run all models × prompts in parallel
+        logger.info("[run=%s] STEP 1 — calling runner (model × prompt matrix)", run_id)
+        model_results = await run_models_parallel(request.models_selected, prompts_data, api_keys)
+
+        failed = [r for r in model_results if r.get("error")]
+        succeeded = [r for r in model_results if not r.get("error")]
+        logger.info(
+            "[run=%s] Runner done — %d succeeded, %d failed",
+            run_id, len(succeeded), len(failed),
+        )
+        for r in failed:
+            logger.error(
+                "[run=%s] Runner ERROR model=%s prompt_idx=%s: %s",
+                run_id, r["model_id"], r["prompt_index"], r["error"],
+            )
+
+        run.progress_pct = 50.0
+        db.commit()
+
+        # Step 2 — judge all results in parallel
+        judge_api_key = openai_key
+        logger.info("[run=%s] STEP 2 — calling judge on %d results", run_id, len(succeeded))
+        scored_results = await score_responses_parallel(model_results, rubric, judge_api_key)
+
+        judged = [r for r in scored_results if r.get("scores") and any(v is not None for v in r["scores"].values())]
+        logger.info(
+            "[run=%s] Judge done — %d/%d results have scores",
+            run_id, len(judged), len(scored_results),
+        )
+        for r in scored_results:
+            if r.get("judge_error"):
+                logger.error(
+                    "[run=%s] Judge returned null scores for model=%s prompt_idx=%s",
+                    run_id, r["model_id"], r["prompt_index"],
+                )
+
+        # Step 3 — save ModelResult rows
+        logger.info("[run=%s] STEP 3 — saving %d ModelResult rows", run_id, len(scored_results))
+        for r in scored_results:
+            dim_scores = r.get("scores", {})
+            mr = ModelResult(
+                id=str(uuid.uuid4()),
+                eval_run_id=run_id,
+                prompt_id=r["prompt_id"],
+                prompt_index=str(r["prompt_index"]),
+                model_name=r["model_id"],
+                response_text=r.get("response_text", ""),
+                dimension_scores=dim_scores,
+                dimension_reasoning=r.get("reasoning", {}),
+                hallucination_flagged=r.get("hallucination_flagged", False),
+                hallucination_reason=r.get("hallucination_reason"),
+                tokens_used={"input": r["tokens_in"], "output": r["tokens_out"]},
+                tokens_in=r["tokens_in"],
+                tokens_out=r["tokens_out"],
+                cost_usd=r.get("cost_usd", 0.0),
+            )
+            db.add(mr)
+        db.commit()
+
+        run.progress_pct = 90.0
+        db.commit()
+
+        # Step 4 — generate verdict
+        logger.info("[run=%s] STEP 4 — generating verdict", run_id)
+        generate_verdict(run_id, scored_results, rubric, db)
+
+        run.status = "complete"
+        run.progress_pct = 100.0
+        run.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        logger.info("[run=%s] Eval complete", run_id)
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[run=%s] Eval failed with unhandled exception: %s", run_id, exc)
+        if run and db:
+            run.status = "failed"
+            run.error_message = str(exc)[:500]
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+    finally:
+        if db:
+            db.close()
 
 
 # ── Story 1.6 — Upload with Full Validation ────────────────────────────────
@@ -512,7 +694,7 @@ def start_eval_run(
     db.add(run)
     db.commit()
 
-    # Persist prompts
+    # Persist prompts (image_data stored for image_text modality)
     for p in request.prompts:
         prompt_rec = Prompt(
             id=str(uuid.uuid4()),
@@ -520,6 +702,7 @@ def start_eval_run(
             prompt_text=p.prompt,
             expected_output=p.expected_output,
             engineer_name=p.engineer_name,
+            image_data=p.image_data,
         )
         db.add(prompt_rec)
     db.commit()

@@ -371,8 +371,12 @@ class TestDevMode:
         assert scores["hallucination"] == MOCK_SCORES["hallucination"]
         assert scores["instruction_following"] == MOCK_SCORES["instruction_following"]
         assert scores["conciseness"] == MOCK_SCORES["conciseness"]
-        # cost_efficiency is auto-calculated — just assert it's present and numeric
-        assert isinstance(scores["cost_efficiency"], (int, float))
+        # Session 4: cost_efficiency is no longer stored per-result in dimension_scores.
+        # It is calculated per-model across all prompts and stored in verdict.score_breakdown.
+        # Verify it is NOT in dimension_scores (correct design post-Session-4).
+        assert "cost_efficiency" not in scores, (
+            "cost_efficiency must not be stored in dimension_scores (it lives in verdict.score_breakdown)"
+        )
 
     def test_dev_mode_never_calls_real_apis(self, client: TestClient, mocker):
         """DEV_MODE=true must not invoke any real provider API client."""

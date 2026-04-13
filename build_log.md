@@ -2,6 +2,57 @@
 
 ---
 
+## Session 4 — 2026-04-12
+
+**Goal:** Stories 2.1 (Verdict Generation) and 2.2 (LLM-as-Judge Scoring). The hardest session.
+
+**Parts completed:** Multi-model runner, LLM-as-Judge, Verdict generation, Results UI.
+
+**New files:**
+- `backend/runner/runner.py` — async parallel runner using asyncio.gather()
+- `backend/judge/judge.py` — LLM-as-Judge with retry logic, JSON parsing, hallucination flagging
+- `backend/verdict/verdict.py` — weighted scoring, cost efficiency normalization, hallucination penalty, verdict text
+
+**DB schema changes (delete verdictai.db to apply):**
+- `EvalRun.progress_pct` (Float) — updated during runner (0→50→90→100%)
+- `Prompt.image_data` (Text) — base64 data URI for image prompts
+- `ModelResult.tokens_in` / `tokens_out` (Integer) — separate token count columns
+- `Verdict.created_at` (DateTime)
+
+**Hallucination semantics change (breaking, intentional):**
+- Old (Sessions 1-3): `score >= 7` → flagged. Low score = good.
+- New (Session 4): `score <= 3` → flagged. High score = good (10 = no hallucination).
+- Updated `models.yaml` mock_scores.hallucination from 2.8 → 8.5.
+- Updated `test_session_1.py` to remove cost_efficiency from dimension_scores check.
+
+**Judge prompt version that worked (DEV_MODE=false):**
+```
+System: "You are an impartial AI evaluation judge. Your job is to score AI model responses
+against a user-defined rubric. You must always return valid JSON. You must never return
+scores without reasoning. You must quote specific text from the response that influenced
+each score."
+
+User: [prompt] → [response] → [rubric dimensions with weights from models.yaml] →
+[ground truth if provided] → structured JSON return with scores/reasoning/evidence per dim.
+
+Temperature: 0, max_tokens: 1000. Retry once on invalid JSON. Null scores on double failure.
+```
+
+**Architecture decisions:**
+- `asyncio.run()` called from sync BackgroundTask thread — safe because FastAPI runs sync tasks in threadpool (no existing event loop in that thread)
+- Provider imports (`AsyncOpenAI`, `AsyncAnthropic`) moved to module-level in runner.py to allow patch-based testing
+- `cost_efficiency` removed from `ModelResult.dimension_scores` — it's a per-model derived metric calculated in verdict.py from `total_cost / weighted_quality_score`, not a per-result judge score
+- Real verdict generation runs even in DEV_MODE (uses mock scores but full calculation logic) — ensures verdict.py logic is exercised in all test runs
+- Hallucination disqualification: >30% of prompts flagged → model cannot win (even if highest score)
+
+**Test results:** 20/20 Session 4 tests passing. 108/108 total (no regressions).
+
+**Stories passing:** 2.1 ✓, 2.2 ✓
+
+**Next session:** Session 5 — TBD (export, reporting, or additional eval features)
+
+---
+
 ## Session 0 — 2026-04-05
 
 **Goal:** Repository scaffolding and pre-build setup.
