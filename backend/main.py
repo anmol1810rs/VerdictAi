@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -7,6 +8,16 @@ from fastapi import FastAPI
 load_dotenv()
 
 DEV_MODE = os.getenv("DEV_MODE", "true").lower() == "true"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("verdictai.log", mode="a"),
+    ],
+)
 
 
 @asynccontextmanager

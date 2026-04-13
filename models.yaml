@@ -226,12 +226,13 @@ dimensions:
     display_name: "Hallucination Rate"
     description: "Does the model state things that are false or unsupported?"
     judge_instruction: >
-      Score the hallucination risk (0 = severe hallucinations, 10 = none detected).
+      Score the hallucination quality (10 = no hallucinations detected, 0 = severe hallucinations).
       If any hallucination is found, quote the exact excerpt that triggered the flag.
       State what source or reasoning confirmed it is a hallucination.
+      flagged=true when score <= 3 (severe hallucination detected).
     min_weight: 1                               # CANNOT be zero — enforced in UI
-    mandatory_penalty: true                     # high score overrides positive verdict
-    penalty_threshold: 7                        # scores >= 7/10 trigger verdict warning
+    mandatory_penalty: true                     # low score overrides positive verdict
+    penalty_threshold: 3                        # scores <= 3/10 flag the model (hallucinating)
     auto_calculated: false
 
   instruction_following:
@@ -324,7 +325,7 @@ dev_mode:
 
   mock_scores:
     accuracy: 7.2
-    hallucination: 2.8                          # low number = low hallucination = good
+    hallucination: 8.5                          # 10 = no hallucination (best), 0 = severe hallucination (worst)
     instruction_following: 8.1
     conciseness: 6.5
     cost_efficiency: auto

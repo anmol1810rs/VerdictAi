@@ -6,6 +6,7 @@ Session 2: full validation (Story 1.6), modality detection (Story 1.5),
            engineer tagging + run label (Story 1.4).
 Session 3: background eval + status polling (Story 1.7),
            run history sidebar with filters (Story 1.8).
+Session 4: real multi-model runner + LLM-as-Judge + verdict display (Stories 2.1, 2.2).
 """
 import os
 import time
@@ -560,34 +561,280 @@ with tab_run:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# TAB 5 — Results
+# TAB 5 — Results (Session 4: verdict card, score table, cost breakdown, per-prompt)
 # ──────────────────────────────────────────────────────────────────────────
 
+# Dimension display names map
+DIMENSION_DISPLAY = {
+    "accuracy": "Accuracy",
+    "hallucination": "Hallucination",
+    "instruction_following": "Instruction",
+    "conciseness": "Conciseness",
+}
+
+DIMENSION_COLORS = {
+    "accuracy": "#10a37f",
+    "hallucination": "#e53e3e",
+    "instruction_following": "#3182ce",
+    "conciseness": "#d69e2e",
+}
+
+
+def _score_color(score) -> str:
+    """Return green / amber / red CSS color based on 0-10 score."""
+    if score is None:
+        return "#888888"
+    if score >= 7:
+        return "#2e7d32"   # green
+    if score >= 4:
+        return "#e65100"   # amber
+    return "#c62828"       # red
+
+
+def _score_badge(score) -> str:
+    """Format score as colored badge string."""
+    if score is None:
+        return "N/A"
+    return f"{score:.1f}"
+
+
 with tab_results:
-    st.header("Results")
+    st.header("📊 Results")
 
     run_id = st.session_state.get("last_run_id")
     if not run_id:
-        st.info("No evaluation run yet. Complete an eval in the **Run Evaluation** tab.")
+        st.info("No evaluation run yet. Complete an eval in the **▶️ Run Evaluation** tab.")
     else:
-        with st.spinner("Loading results..."):
-            try:
-                resp = requests.get(f"{BACKEND_URL}/eval/{run_id}/results", timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    st.success(f"Run `{run_id}` — Status: **{data['status']}**")
+        try:
+            resp = requests.get(f"{BACKEND_URL}/eval/{run_id}/results", timeout=10)
+            if resp.status_code != 200:
+                try:
+                    err = resp.json()
+                except Exception:
+                    err = resp.text
+                st.error(f"Could not load results: {err}")
+            else:
+                data = resp.json()
+                results = data.get("results", [])
+                verdict = data.get("verdict")
 
-                    if data.get("verdict"):
-                        st.subheader("⚖️ Verdict")
-                        st.markdown(f"**Winning model:** {data['verdict']['winning_model']}")
-                        st.markdown(data["verdict"]["summary"])
+                # ── 1. Verdict Card ────────────────────────────────────────────
+                if verdict:
+                    winning_model = verdict.get("winning_model", "Unknown")
+                    summary = verdict.get("summary", "")
+                    warnings = verdict.get("hallucination_warnings", [])
 
-                    st.subheader("📊 Scores (per result)")
-                    st.caption("Full dimension scoring UI — Session 4")
-                    for r in data["results"][:3]:
-                        with st.expander(f"{r['model_name']} — prompt {r['prompt_index']}"):
-                            st.json(r["dimension_scores"])
+                    st.markdown(
+                        f"""
+<div style="background:#0d1f17;border:1px solid #10a37f;border-left:6px solid #10a37f;padding:20px;border-radius:8px;margin-bottom:16px">
+  <h2 style="color:#10a37f;margin:0">⚖️ Verdict: {winning_model}</h2>
+  <p style="margin:8px 0 0 0;white-space:pre-line;color:#d1fae5;line-height:1.6">{summary}</p>
+</div>
+""",
+                        unsafe_allow_html=True,
+                    )
+
+                    if warnings:
+                        for w in warnings:
+                            st.warning(f"⚠️ {w}")
                 else:
-                    st.error(f"Could not load results: {resp.json()}")
-            except requests.exceptions.ConnectionError:
-                st.error("Cannot reach backend.")
+                    st.info("Verdict not yet generated.")
+
+                if not results:
+                    st.info("No model results found for this run.")
+                else:
+                    # Collect unique models and dimensions
+                    all_models = sorted({r["model_name"] for r in results})
+                    all_dims = ["accuracy", "hallucination", "instruction_following", "conciseness"]
+
+                    # ── 2. Score Breakdown Table ───────────────────────────────
+                    st.subheader("📋 Score Breakdown")
+                    st.caption("Average score per model per dimension. Click any model to see per-prompt reasoning.")
+
+                    # Aggregate: average per model per dimension
+                    from collections import defaultdict
+                    dim_sum: dict = defaultdict(lambda: defaultdict(float))
+                    dim_cnt: dict = defaultdict(lambda: defaultdict(int))
+                    for r in results:
+                        m = r["model_name"]
+                        for d in all_dims:
+                            v = r.get("dimension_scores", {}).get(d)
+                            if v is not None:
+                                dim_sum[m][d] += float(v)
+                                dim_cnt[m][d] += 1
+
+                    # Build table rows
+                    table_rows = []
+                    for m in all_models:
+                        row = {"Model": m}
+                        total = 0.0
+                        count = 0
+                        for d in all_dims:
+                            avg = (
+                                dim_sum[m][d] / dim_cnt[m][d]
+                                if dim_cnt[m][d] > 0
+                                else None
+                            )
+                            row[DIMENSION_DISPLAY.get(d, d)] = _score_badge(avg)
+                            if avg is not None:
+                                total += avg
+                                count += 1
+                        row["Total"] = _score_badge(total / count if count else None)
+                        is_winner = verdict and m == verdict.get("winning_model")
+                        row[""] = "🏆 Winner" if is_winner else ""
+                        table_rows.append(row)
+
+                    if table_rows:
+                        import pandas as pd
+                        df = pd.DataFrame(table_rows)
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+
+                    # Inline reasoning viewer
+                    with st.expander("🔍 View reasoning per model", expanded=False):
+                        selected_model_view = st.selectbox(
+                            "Select model", all_models, key="reasoning_model_select"
+                        )
+                        model_results_for_view = [
+                            r for r in results if r["model_name"] == selected_model_view
+                        ]
+                        for r in model_results_for_view[:5]:
+                            st.markdown(f"**Prompt {r['prompt_index']}**")
+                            scores = r.get("dimension_scores", {})
+                            reasoning = r.get("dimension_reasoning", {})
+                            for d in all_dims:
+                                score_val = scores.get(d)
+                                reason_text = reasoning.get(d, "—")
+                                color = _score_color(score_val)
+                                st.markdown(
+                                    f"<span style='color:{color};font-weight:bold'>"
+                                    f"{DIMENSION_DISPLAY.get(d, d)}: {_score_badge(score_val)}/10</span>"
+                                    f" — {reason_text}",
+                                    unsafe_allow_html=True,
+                                )
+                            if r.get("hallucination_flagged"):
+                                st.error(
+                                    f"⚠️ Hallucination flagged: {r.get('hallucination_reason', 'detected')}"
+                                )
+                            st.divider()
+
+                    # ── 3. Cost Breakdown ──────────────────────────────────────
+                    st.subheader("💰 Cost Breakdown")
+
+                    cost_by_model: dict = defaultdict(float)
+                    tokens_in_by_model: dict = defaultdict(int)
+                    tokens_out_by_model: dict = defaultdict(int)
+                    prompt_count_by_model: dict = defaultdict(int)
+                    for r in results:
+                        m = r["model_name"]
+                        cost_by_model[m] += r.get("cost_usd", 0.0)
+                        tu = r.get("tokens_used", {})
+                        tokens_in_by_model[m] += tu.get("input", 0)
+                        tokens_out_by_model[m] += tu.get("output", 0)
+                        prompt_count_by_model[m] += 1
+
+                    cost_rows = []
+                    for m in all_models:
+                        total_cost = cost_by_model[m]
+                        tin = tokens_in_by_model[m]
+                        tout = tokens_out_by_model[m]
+                        total_tokens = tin + tout
+                        cost_per_1k = (total_cost / total_tokens * 1000) if total_tokens > 0 else 0.0
+                        quality_score = (
+                            dim_sum[m]["accuracy"] / dim_cnt[m]["accuracy"]
+                            if dim_cnt[m]["accuracy"] > 0 else 1.0
+                        )
+                        cpp = total_cost / quality_score if quality_score > 0 else 0.0
+                        cost_rows.append(
+                            {
+                                "Model": m,
+                                "Total Cost (USD)": f"${total_cost:.6f}",
+                                "Tokens In": f"{tin:,}",
+                                "Tokens Out": f"{tout:,}",
+                                "Cost / 1K tokens": f"${cost_per_1k:.6f}",
+                                "Cost / Quality Pt": f"${cpp:.6f}",
+                            }
+                        )
+
+                    if cost_rows:
+                        import pandas as pd
+                        cost_df = pd.DataFrame(cost_rows)
+                        st.dataframe(cost_df, use_container_width=True, hide_index=True)
+
+                    # ── 4. Per-Prompt Breakdown ────────────────────────────────
+                    st.subheader("🔎 Per-Prompt Breakdown")
+                    st.caption("Expand any prompt to see full model responses and scores.")
+
+                    # Group results by prompt index
+                    prompts_map: dict = defaultdict(list)
+                    for r in results:
+                        prompts_map[r["prompt_index"]].append(r)
+
+                    sorted_indices = sorted(prompts_map.keys())
+
+                    # Highlight highest-variance prompts (top 3 by score range)
+                    def _prompt_variance(prompt_results) -> float:
+                        totals = []
+                        for r in prompt_results:
+                            s = r.get("dimension_scores", {})
+                            vals = [v for v in s.values() if v is not None]
+                            if vals:
+                                totals.append(sum(vals) / len(vals))
+                        if len(totals) < 2:
+                            return 0.0
+                        return max(totals) - min(totals)
+
+                    variances = {idx: _prompt_variance(prompts_map[idx]) for idx in sorted_indices}
+                    top_variance_indices = set(
+                        sorted(sorted_indices, key=lambda i: variances[i], reverse=True)[:3]
+                    )
+
+                    for idx in sorted_indices:
+                        prompt_results = prompts_map[idx]
+                        first = prompt_results[0]
+                        prompt_preview = first.get("prompt_text", f"Prompt {idx}")[:80]
+                        if len(first.get("prompt_text", "")) > 80:
+                            prompt_preview += "..."
+
+                        is_high_variance = idx in top_variance_indices and len(sorted_indices) > 1
+                        label = f"{'⚡ ' if is_high_variance else ''}Prompt {idx}: {prompt_preview}"
+
+                        with st.expander(label, expanded=False):
+                            if is_high_variance:
+                                st.info("⚡ High variance — models diverged significantly on this prompt.")
+
+                            for r in prompt_results:
+                                model_name = r["model_name"]
+                                scores = r.get("dimension_scores", {})
+                                avg_score = None
+                                vals = [v for v in scores.values() if v is not None]
+                                if vals:
+                                    avg_score = sum(vals) / len(vals)
+
+                                badge_color = _score_color(avg_score)
+                                st.markdown(
+                                    f"<b style='color:{badge_color}'>{model_name}"
+                                    f" (avg: {_score_badge(avg_score)}/10)</b>",
+                                    unsafe_allow_html=True,
+                                )
+
+                                if r.get("hallucination_flagged"):
+                                    st.error("⚠️ Hallucination flagged on this prompt.")
+
+                                with st.container():
+                                    col_resp, col_scores = st.columns([3, 2])
+                                    with col_resp:
+                                        st.markdown("**Response:**")
+                                        st.text(r.get("response_text", "")[:500])
+                                    with col_scores:
+                                        st.markdown("**Scores:**")
+                                        for d in all_dims:
+                                            v = scores.get(d)
+                                            st.markdown(
+                                                f"<span style='color:{_score_color(v)}'>"
+                                                f"{DIMENSION_DISPLAY.get(d, d)}: {_score_badge(v)}</span>",
+                                                unsafe_allow_html=True,
+                                            )
+                                st.divider()
+
+        except requests.exceptions.ConnectionError:
+            st.error("Cannot reach backend. Is the FastAPI server running?")
