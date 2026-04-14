@@ -57,6 +57,7 @@ class ModelResult(Base):
     tokens_in = Column(Integer, nullable=True)      # input tokens (separate column for queries)
     tokens_out = Column(Integer, nullable=True)     # output tokens
     cost_usd = Column(Float, nullable=False, default=0.0)
+    variance_score = Column(Float, nullable=True)   # max-min weighted score across models for this prompt
 
 
 class Verdict(Base):

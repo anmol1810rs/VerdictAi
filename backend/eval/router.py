@@ -391,6 +391,9 @@ def _run_mock_eval(
     # Use real verdict generation so scoring logic is exercised even in dev mode
     generate_verdict(run_id, scored_results, rubric, db)
 
+    from backend.verdict.verdict import save_variance_scores
+    save_variance_scores(run_id, scored_results, rubric, db)
+
 
 async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
     """
@@ -504,6 +507,10 @@ async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
         # Step 4 — generate verdict
         logger.info("[run=%s] STEP 4 — generating verdict", run_id)
         generate_verdict(run_id, scored_results, rubric, db)
+
+        # Step 5 — save per-prompt variance scores
+        from backend.verdict.verdict import save_variance_scores
+        save_variance_scores(run_id, scored_results, rubric, db)
 
         run.status = "complete"
         run.progress_pct = 100.0
@@ -820,16 +827,26 @@ def get_eval_results(run_id: str, db: Session = Depends(get_db)):
     db_results = db.query(ModelResult).filter(ModelResult.eval_run_id == run_id).all()
     db_verdict = db.query(Verdict).filter(Verdict.eval_run_id == run_id).first()
 
+    # Build prompt_text lookup (join by prompt_id)
+    prompt_texts: dict = {
+        p.id: p.prompt_text
+        for p in db.query(Prompt).filter(Prompt.eval_run_id == run_id).all()
+    }
+
     results_out = [
         ModelResultOut(
             model_name=r.model_name,
             prompt_index=int(r.prompt_index),
+            prompt_text=prompt_texts.get(r.prompt_id),
             response_text=r.response_text,
             dimension_scores=r.dimension_scores,
             dimension_reasoning=r.dimension_reasoning,
             hallucination_flagged=r.hallucination_flagged,
             tokens_used=r.tokens_used,
+            tokens_in=r.tokens_in,
+            tokens_out=r.tokens_out,
             cost_usd=r.cost_usd,
+            variance_score=r.variance_score,
         )
         for r in db_results
     ]

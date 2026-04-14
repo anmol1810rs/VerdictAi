@@ -19,6 +19,20 @@ from typing import Optional
 JUDGE_DIMENSIONS = ["accuracy", "hallucination", "instruction_following", "conciseness"]
 HALLUCINATION_DISQUALIFY_PCT = 0.30  # >30% prompts flagged → cannot win
 
+# Worth-it decision thresholds for cost comparison callout
+_WORTH_IT_SCORE_DELTA = 1.0   # premium model must score > 1.0 pts higher
+_WORTH_IT_COST_MAX = 0.10     # premium model must cost < $0.10 more per run
+_NOT_WORTH_IT_SCORE_DELTA = 0.5  # score delta < 0.5 → not worth it
+_NOT_WORTH_IT_COST_MIN = 0.20    # cost delta > $0.20 → not worth it
+
+# Per-dimension insight phrases for variance auto-insight
+DIMENSION_INSIGHTS: dict = {
+    "accuracy": "this prompt tests factual knowledge where model training data may differ",
+    "hallucination": "models vary in tendency to fabricate information on this topic",
+    "instruction_following": "models interpreted the instructions differently",
+    "conciseness": "models chose very different response lengths for this prompt",
+}
+
 
 # ── Score calculations ─────────────────────────────────────────────────────
 
@@ -114,9 +128,61 @@ def _build_score_breakdown(
     return breakdown
 
 
-def _build_cost_comparison(model_total_costs: dict, model_quality_scores: dict) -> dict:
-    """Build cost_comparison JSON saved to DB and shown in UI."""
-    comparison = {}
+def generate_cost_comparison_callout(
+    model_quality_scores: dict,
+    model_total_costs: dict,
+    model_ids: list,
+) -> str:
+    """
+    Auto-generate a one-sentence cost comparison callout.
+
+    Worth-it rule:
+      score_delta > 1.0 AND cost_delta < $0.10  → "premium is worth it"
+      score_delta < 0.5 OR  cost_delta > $0.20  → "not worth it"
+      otherwise                                  → neutral (state the numbers)
+
+    Public — tested directly.
+    """
+    if len(model_ids) < 2:
+        return ""
+
+    sorted_by_cost = sorted(model_ids, key=lambda m: model_total_costs.get(m, 0.0))
+    cheapest = sorted_by_cost[0]
+    most_expensive = sorted_by_cost[-1]
+
+    if cheapest == most_expensive:
+        return ""
+
+    cost_delta = model_total_costs[most_expensive] - model_total_costs[cheapest]
+    score_delta = model_quality_scores[most_expensive] - model_quality_scores[cheapest]
+    expensive_cost = model_total_costs[most_expensive]
+    cheaper_pct = round((cost_delta / expensive_cost) * 100) if expensive_cost > 0 else 0
+
+    if score_delta > _WORTH_IT_SCORE_DELTA and cost_delta < _WORTH_IT_COST_MAX:
+        return (
+            f"{most_expensive} costs ${cost_delta:.4f} more than {cheapest} "
+            f"but scores {round(score_delta, 1)} points higher on quality. "
+            f"The premium is worth it for high-stakes annotation work."
+        )
+    if score_delta < _NOT_WORTH_IT_SCORE_DELTA or cost_delta > _NOT_WORTH_IT_COST_MIN:
+        return (
+            f"{cheapest} delivers comparable quality at {cheaper_pct}% lower cost "
+            f"— recommended for high-volume pipelines."
+        )
+    direction = "higher" if score_delta >= 0 else "lower"
+    return (
+        f"{most_expensive} costs ${cost_delta:.4f} more than {cheapest} "
+        f"and scores {round(abs(score_delta), 1)} points {direction}. "
+        f"Consider your volume and quality requirements."
+    )
+
+
+def _build_cost_comparison(
+    model_total_costs: dict,
+    model_quality_scores: dict,
+) -> dict:
+    """Build cost_comparison JSON saved to DB and shown in UI. Includes callout."""
+    comparison: dict = {}
     for mid, total_cost in model_total_costs.items():
         quality = model_quality_scores.get(mid, 0)
         cpp = round(total_cost / quality, 6) if quality > 0 else 0.0
@@ -124,7 +190,113 @@ def _build_cost_comparison(model_total_costs: dict, model_quality_scores: dict) 
             "total_cost_usd": round(total_cost, 6),
             "cost_per_quality_point": cpp,
         }
+    comparison["callout"] = generate_cost_comparison_callout(
+        model_quality_scores, model_total_costs, list(model_total_costs.keys())
+    )
     return comparison
+
+
+# ── Prompt variance ────────────────────────────────────────────────────────
+
+
+def calculate_prompt_variance(prompt_results: list, rubric_weights: dict) -> float:
+    """
+    Variance = max(weighted_score) - min(weighted_score) across models for one prompt.
+    Public — tested directly.
+    """
+    scores = []
+    for r in prompt_results:
+        ws = calculate_weighted_quality_score(r.get("scores", {}), rubric_weights)
+        scores.append(ws)
+    if len(scores) < 2:
+        return 0.0
+    return round(max(scores) - min(scores), 4)
+
+
+def generate_variance_insight(prompt_results: list) -> str:
+    """
+    Find the dimension with the largest per-prompt score delta across models.
+    Returns a one-sentence insight mentioning that dimension.
+    Public — tested directly.
+    """
+    if len(prompt_results) < 2:
+        return ""
+
+    max_delta = 0.0
+    max_dim: Optional[str] = None
+    for dim in JUDGE_DIMENSIONS:
+        vals = [
+            float(r["scores"][dim])
+            for r in prompt_results
+            if r.get("scores", {}).get(dim) is not None
+        ]
+        if len(vals) < 2:
+            continue
+        delta = max(vals) - min(vals)
+        if delta > max_delta:
+            max_delta = delta
+            max_dim = dim
+
+    if max_dim is None:
+        return ""
+
+    phrase = DIMENSION_INSIGHTS.get(max_dim, "models showed different performance")
+    dim_display = max_dim.replace("_", " ")
+    return (
+        f"Models differed most on {dim_display} (\u03b4={max_delta:.1f}) \u2014 {phrase}."
+    )
+
+
+def rank_prompts_by_variance(
+    scored_results: list,
+    rubric_config: dict,
+) -> list:
+    """
+    Returns list of (prompt_id, variance_score) sorted by variance descending.
+    Public — tested directly.
+    """
+    by_prompt: dict = defaultdict(list)
+    for r in scored_results:
+        if not r.get("error"):
+            by_prompt[r["prompt_id"]].append(r)
+
+    variances = [
+        (pid, calculate_prompt_variance(results, rubric_config))
+        for pid, results in by_prompt.items()
+    ]
+    return sorted(variances, key=lambda x: x[1], reverse=True)
+
+
+def get_high_variance_prompt_ids(
+    ranked_prompts: list,
+    top_n: int = 3,
+) -> set:
+    """
+    Returns the set of top_n prompt_ids by variance.
+    Public — tested directly.
+    """
+    return {pid for pid, _ in ranked_prompts[:top_n]}
+
+
+def save_variance_scores(
+    run_id: str,
+    scored_results: list,
+    rubric_config: dict,
+    db,
+) -> None:
+    """
+    Calculate variance per prompt and persist to model_results.variance_score.
+    Called after generate_verdict() while the same DB session is still open.
+    """
+    from backend.db.models import ModelResult  # deferred to avoid circular import
+
+    ranked = rank_prompts_by_variance(scored_results, rubric_config)
+    for prompt_id, variance in ranked:
+        db.query(ModelResult).filter(
+            ModelResult.eval_run_id == run_id,
+            ModelResult.prompt_id == prompt_id,
+        ).update({"variance_score": variance})
+    db.commit()
 
 
 # ── Verdict text generation ────────────────────────────────────────────────

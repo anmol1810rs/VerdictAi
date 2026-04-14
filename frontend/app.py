@@ -727,9 +727,15 @@ with tab_results:
                     for r in results:
                         m = r["model_name"]
                         cost_by_model[m] += r.get("cost_usd", 0.0)
-                        tu = r.get("tokens_used", {})
-                        tokens_in_by_model[m] += tu.get("input", 0)
-                        tokens_out_by_model[m] += tu.get("output", 0)
+                        # Prefer direct columns; fall back to tokens_used dict
+                        tin_r = r.get("tokens_in")
+                        tout_r = r.get("tokens_out")
+                        if tin_r is None:
+                            tu = r.get("tokens_used", {})
+                            tin_r = tu.get("input", 0)
+                            tout_r = tu.get("output", 0)
+                        tokens_in_by_model[m] += tin_r or 0
+                        tokens_out_by_model[m] += tout_r or 0
                         prompt_count_by_model[m] += 1
 
                     cost_rows = []
@@ -760,6 +766,16 @@ with tab_results:
                         cost_df = pd.DataFrame(cost_rows)
                         st.dataframe(cost_df, use_container_width=True, hide_index=True)
 
+                    # "Prices last updated" date from pricing.yaml meta
+                    _last_updated = pricing_cfg.get("meta", {}).get("last_updated", "")
+                    if _last_updated:
+                        st.caption(f"Prices last updated: {_last_updated}")
+
+                    # Cost comparison callout from verdict
+                    _callout = (verdict or {}).get("cost_comparison", {}).get("callout", "")
+                    if _callout:
+                        st.info(f"💡 {_callout}")
+
                     # ── 4. Per-Prompt Breakdown ────────────────────────────────
                     st.subheader("🔎 Per-Prompt Breakdown")
                     st.caption("Expand any prompt to see full model responses and scores.")
@@ -769,10 +785,8 @@ with tab_results:
                     for r in results:
                         prompts_map[r["prompt_index"]].append(r)
 
-                    sorted_indices = sorted(prompts_map.keys())
-
-                    # Highlight highest-variance prompts (top 3 by score range)
-                    def _prompt_variance(prompt_results) -> float:
+                    # Sort by variance_score from API (saved to DB); fall back to client-side calc
+                    def _prompt_variance_fallback(prompt_results) -> float:
                         totals = []
                         for r in prompt_results:
                             s = r.get("dimension_scores", {})
@@ -783,24 +797,59 @@ with tab_results:
                             return 0.0
                         return max(totals) - min(totals)
 
-                    variances = {idx: _prompt_variance(prompts_map[idx]) for idx in sorted_indices}
-                    top_variance_indices = set(
-                        sorted(sorted_indices, key=lambda i: variances[i], reverse=True)[:3]
+                    def _get_variance(idx) -> float:
+                        pr = prompts_map[idx]
+                        vs = pr[0].get("variance_score")
+                        if vs is not None:
+                            return vs
+                        return _prompt_variance_fallback(pr)
+
+                    sorted_indices = sorted(
+                        prompts_map.keys(), key=_get_variance, reverse=True
                     )
+
+                    top_variance_indices = set(sorted_indices[:3]) if len(sorted_indices) > 1 else set()
+
+                    def _variance_insight(prompt_results) -> str:
+                        """One-sentence insight: dimension with highest delta across models."""
+                        dims = ["accuracy", "hallucination", "instruction_following", "conciseness"]
+                        insight_phrases = {
+                            "accuracy": "this prompt tests factual knowledge where model training data may differ",
+                            "hallucination": "models vary in tendency to fabricate information on this topic",
+                            "instruction_following": "models interpreted the instructions differently",
+                            "conciseness": "models chose very different response lengths for this prompt",
+                        }
+                        max_delta, max_dim = 0.0, None
+                        for d in dims:
+                            vals = [r.get("dimension_scores", {}).get(d) for r in prompt_results]
+                            vals = [v for v in vals if v is not None]
+                            if len(vals) >= 2:
+                                delta = max(vals) - min(vals)
+                                if delta > max_delta:
+                                    max_delta, max_dim = delta, d
+                        if max_dim is None:
+                            return ""
+                        phrase = insight_phrases.get(max_dim, "models showed different performance")
+                        return f"Models differed most on **{max_dim.replace('_', ' ')}** (δ={max_delta:.1f}) — {phrase}."
 
                     for idx in sorted_indices:
                         prompt_results = prompts_map[idx]
                         first = prompt_results[0]
-                        prompt_preview = first.get("prompt_text", f"Prompt {idx}")[:80]
-                        if len(first.get("prompt_text", "")) > 80:
+                        prompt_preview = (first.get("prompt_text") or f"Prompt {idx}")[:80]
+                        if len(first.get("prompt_text") or "") > 80:
                             prompt_preview += "..."
 
-                        is_high_variance = idx in top_variance_indices and len(sorted_indices) > 1
-                        label = f"{'⚡ ' if is_high_variance else ''}Prompt {idx}: {prompt_preview}"
+                        is_high_variance = idx in top_variance_indices
+                        badge = "⚡ " if is_high_variance else ""
+                        label = f"{badge}Prompt {idx}: {prompt_preview}"
 
                         with st.expander(label, expanded=False):
                             if is_high_variance:
-                                st.info("⚡ High variance — models diverged significantly on this prompt.")
+                                insight = _variance_insight(prompt_results)
+                                st.info(
+                                    "⚡ **Models disagreed significantly on this prompt.**"
+                                    + (f"\n\n{insight}" if insight else "")
+                                )
 
                             for r in prompt_results:
                                 model_name = r["model_name"]

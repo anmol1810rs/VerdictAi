@@ -110,12 +110,16 @@ class DimensionScores(BaseModel):
 class ModelResultOut(BaseModel):
     model_name: str
     prompt_index: int
+    prompt_text: Optional[str] = None       # joined from prompts table
     response_text: str
     dimension_scores: dict
     dimension_reasoning: dict
     hallucination_flagged: bool
     tokens_used: dict
+    tokens_in: Optional[int] = None         # direct column for export (S7)
+    tokens_out: Optional[int] = None        # direct column for export (S7)
     cost_usd: float
+    variance_score: Optional[float] = None  # max-min weighted score across models for this prompt
 
 
 class EvalRunResponse(BaseModel):
