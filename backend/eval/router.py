@@ -116,15 +116,23 @@ def _parse_zip(content: bytes) -> tuple[list[dict], str, list[ValidationWarning]
         manifest_data = json.loads(z.read(manifest_names[0]))
         rows = manifest_data if isinstance(manifest_data, list) else manifest_data.get("prompts", [])
 
+        # Directory containing manifest.json — used to resolve relative image paths
+        # e.g. if manifest is at "myfolder/manifest.json", images at "myfolder/images/foo.png"
+        manifest_dir = manifest_names[0].rsplit("/", 1)[0] if "/" in manifest_names[0] else ""
+
         # Validate and extract image bytes into base64 data URIs
+        # Support both "image" and "image_path" keys in manifest.json
         for row in rows:
-            if "image_path" in row and row["image_path"]:
-                image_path = row["image_path"]
+            image_path = row.get("image_path") or row.get("image")
+            if image_path:
+                # Resolve path: try as-is first, then relative to manifest directory
+                if image_path not in names and manifest_dir:
+                    image_path = f"{manifest_dir}/{image_path}"
                 if image_path not in names:
                     raise HTTPException(
                         status_code=422,
                         detail=(
-                            f"Image file '{image_path}' referenced in manifest.json "
+                            f"Image file '{row.get('image_path') or row.get('image')}' referenced in manifest.json "
                             f"not found in ZIP. Check the file path and ensure all "
                             f"referenced images are included."
                         ),
@@ -695,7 +703,11 @@ def start_eval_run(
     db.commit()
 
     # Persist prompts (image_data stored for image_text modality)
-    for p in request.prompts:
+    for idx, p in enumerate(request.prompts):
+        logger.info(
+            "[run=%s] Prompt %d image_data present=%s len=%s",
+            run_id, idx, bool(p.image_data), len(p.image_data) if p.image_data else 0,
+        )
         prompt_rec = Prompt(
             id=str(uuid.uuid4()),
             eval_run_id=run_id,

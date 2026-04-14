@@ -65,12 +65,8 @@ async def _call_openai(
     content: list = [{"type": "input_text", "text": prompt_text}]
 
     if image_data:
-        if "base64," in image_data:
-            # Strip the data URI prefix — Responses API wants raw base64
-            b64 = image_data.split("base64,", 1)[1]
-            content.append({"type": "input_image", "image_base64": b64})
-        else:
-            content.append({"type": "input_image", "image_url": image_data})
+        # Responses API uses image_url for both remote URLs and base64 data URIs
+        content.append({"type": "input_image", "image_url": image_data})
 
     response = await client.responses.create(
         model=model_config["api_model_string"],
