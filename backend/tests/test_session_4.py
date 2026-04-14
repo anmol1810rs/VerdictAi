@@ -210,32 +210,36 @@ class TestMultiModelRunner:
         image_data = f"data:image/png;base64,{png_b64}"
         prompt_text = "Describe this image."
 
-        # ── OpenAI format check ────────────────────────────────────────────
+        # ── OpenAI format check (Responses API: client.responses.create) ────
         openai_model_cfg = next(m for m in MODELS_CONFIG["mvp_models"] if m["id"] == "gpt-5-4")
 
         openai_calls = []
 
-        async def mock_openai_create(**kwargs):
+        async def mock_responses_create(**kwargs):
             openai_calls.append(kwargs)
 
-            class FakeChoice:
-                class message:
-                    content = "OpenAI image response"
+            class FakeContentItem:
+                text = "OpenAI image response"
+
+            class FakeOutput:
+                content = [FakeContentItem()]
 
             class FakeUsage:
-                prompt_tokens = 50
-                completion_tokens = 20
+                input_tokens = 50
+                output_tokens = 20
 
             class FakeResponse:
-                choices = [FakeChoice()]
+                output = [FakeOutput()]
                 usage = FakeUsage()
 
             return FakeResponse()
 
+        mock_responses = mock.MagicMock()
+        mock_responses.create = mock_responses_create
         mock_client = mock.MagicMock()
-        mock_client.chat.completions.create = mock_openai_create
+        mock_client.responses = mock_responses
 
-        # AsyncOpenAI is now a module-level name — patch at backend.runner.runner
+        # AsyncOpenAI is a module-level name — patch at backend.runner.runner
         async def run_openai_test():
             with mock.patch("backend.runner.runner.AsyncOpenAI", return_value=mock_client):
                 await _call_openai(openai_model_cfg, prompt_text, image_data, "sk-test")
@@ -243,12 +247,17 @@ class TestMultiModelRunner:
         asyncio.run(run_openai_test())
 
         assert len(openai_calls) == 1
-        messages = openai_calls[0]["messages"]
-        user_content = messages[0]["content"]
+        # Responses API uses `input` (not `messages`)
+        user_content = openai_calls[0]["input"][0]["content"]
         assert isinstance(user_content, list), "OpenAI image prompt must use list content"
         content_types = {item["type"] for item in user_content}
-        assert "image_url" in content_types, (
-            f"OpenAI request must contain image_url block, got types: {content_types}"
+        assert "input_image" in content_types, (
+            f"OpenAI Responses API request must contain input_image block, got types: {content_types}"
+        )
+        # Verify image_url field is present on the input_image block
+        image_block = next(b for b in user_content if b["type"] == "input_image")
+        assert "image_url" in image_block, (
+            "input_image block must have image_url field (data URI)"
         )
 
         # ── Anthropic format check ─────────────────────────────────────────

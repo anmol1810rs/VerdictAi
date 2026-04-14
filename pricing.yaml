@@ -2,6 +2,9 @@
 # VerdictAI — pricing.yaml
 # ============================================================
 # Last updated: 07 April 2026
+
+meta:
+  last_updated: "07 April 2026"
 # Sources:
 #   OpenAI:    https://developers.openai.com/api/docs/pricing
 #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing

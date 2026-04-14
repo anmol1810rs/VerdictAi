@@ -2,6 +2,59 @@
 
 ---
 
+## Session 5 — 2026-04-13
+
+**Goal:** Stories 2.3 (Cost Breakdown Enhancement) and 2.4 (Prompt Variance Analysis).
+
+**Stories completed:** 2.3 ✓, 2.4 ✓
+
+**New files:**
+- `backend/tests/test_session_5.py` — 12 new acceptance tests
+
+**DB schema changes (migration runs automatically — no manual DB reset required):**
+- `ModelResult.variance_score` (Float, nullable) — max-min weighted score across models per prompt
+- `database.py._migrate_add_columns()` — safe ALTER TABLE ADD COLUMN helper; called from `create_tables()` on startup; catches "column already exists" error silently
+
+**Config changes:**
+- `pricing.yaml` — added `meta.last_updated: "07 April 2026"` as a proper YAML key (not just comment) so frontend can display it programmatically
+
+**Backend additions (`backend/verdict/verdict.py`):**
+- `generate_cost_comparison_callout()` — auto-generates one-sentence comparison using the worth-it rule: score_delta > 1.0 AND cost_delta < $0.10 → "worth it"; score_delta < 0.5 OR cost_delta > $0.20 → "not worth it"; otherwise neutral
+- `_build_cost_comparison()` — now includes `callout` key in the returned dict (stored in Verdict.cost_comparison)
+- `calculate_prompt_variance()` — max(weighted_score) - min(weighted_score) across models for one prompt
+- `generate_variance_insight()` — identifies dimension with largest per-prompt delta; returns one-sentence insight
+- `rank_prompts_by_variance()` — returns (prompt_id, variance) sorted descending
+- `get_high_variance_prompt_ids()` — returns top N prompt_ids by variance
+- `save_variance_scores()` — persists variance_score to all ModelResult rows for each prompt; called after generate_verdict() in both mock and real eval paths
+- `DIMENSION_INSIGHTS` — per-dimension natural-language phrases used in variance insights
+
+**Schema changes (`backend/eval/schemas.py`):**
+- `ModelResultOut` — added `prompt_text`, `tokens_in`, `tokens_out`, `variance_score` fields (all Optional for backward compat)
+
+**Router changes (`backend/eval/router.py`):**
+- `get_eval_results` — joins Prompt table to populate `prompt_text` per result row; includes `tokens_in`, `tokens_out`, `variance_score` in API response
+- Both `_run_mock_eval` and `_run_real_eval_async` now call `save_variance_scores()` after verdict generation
+
+**Frontend changes (`frontend/app.py`):**
+- Cost breakdown: "Prices last updated: 07 April 2026" caption below cost table (reads from `pricing_cfg.meta.last_updated`)
+- Cost breakdown: cost comparison callout shown as `st.info()` below the table (from `verdict.cost_comparison.callout`)
+- Per-prompt: prompts now sorted by `variance_score` from API (falls back to client-side calculation if null)
+- Per-prompt: ⚡ badge expander now shows "Models disagreed significantly on this prompt" + auto-insight sentence identifying the highest-delta dimension
+- Per-prompt: `tokens_in`/`tokens_out` read from direct result fields with fallback to `tokens_used` dict
+
+**Bug fixed (pre-existing, test_session_4.py):**
+- `test_image_prompt_uses_correct_format` — was mocking `client.chat.completions.create` but runner uses `client.responses.create` (Responses API). Updated to use AsyncMock on `client.responses.create`, check `input` kwarg (not `messages`), and assert `input_image` content type (not `image_url`)
+
+**Architecture decisions:**
+- Callout stored in `cost_comparison["callout"]` (string key alongside per-model dicts) — avoids schema change to Verdict table
+- Variance insight is regenerated in the frontend from results data (no new DB column needed for insight text)
+- Migration on startup (`_migrate_add_columns`) chosen over Alembic — proportionate for a single-column SQLite add in an MVP
+- Worth-it thresholds ($0.10 / $0.20 / 1.0 / 0.5) are named constants in verdict.py — easy to adjust per PRD rules
+
+**Test results:** 12/12 Session 5 tests passing. 120/120 total (no regressions).
+
+---
+
 ## Session 4 — 2026-04-12
 
 **Goal:** Stories 2.1 (Verdict Generation) and 2.2 (LLM-as-Judge Scoring). The hardest session.
