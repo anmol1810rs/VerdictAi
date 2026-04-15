@@ -1,5 +1,5 @@
 """
-eval/router.py — Session 1-4 endpoints.
+eval/router.py — Session 1-6 endpoints.
 
 Implements:
   POST /upload                  — parse CSV/JSONL/ZIP, validate fully (S1.6), return modality (S1.5)
@@ -10,6 +10,7 @@ Implements:
   GET  /eval/history            — list all runs ordered by recency with filters (S1.8)
   GET  /eval/{run_id}/status    — poll run status (S1.7)
   GET  /eval/{run_id}/results   — fetch stored results
+  GET  /eval/compare            — compare two completed runs side-by-side (S2.6)
 """
 import asyncio
 import csv
@@ -49,6 +50,7 @@ from backend.eval.schemas import (
 from backend.judge.mock_judge import (
     calculate_cost_efficiency,
     calculate_mock_cost,
+    get_mock_gt_score,
     get_mock_judge_scores,
     get_mock_response,
 )
@@ -350,6 +352,9 @@ def _run_mock_eval(
             # cost_efficiency is auto-calculated in verdict.py — keep it out of dim_scores
             dim_scores = {k: v for k, v in scores.items() if k != "cost_efficiency"}
 
+            # Ground truth alignment (mock — only when expected_output present)
+            gt_score, gt_reasoning = get_mock_gt_score(prompt_rec.expected_output)
+
             result = ModelResult(
                 id=str(uuid.uuid4()),
                 eval_run_id=run_id,
@@ -365,6 +370,8 @@ def _run_mock_eval(
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cost_usd=cost_usd,
+                ground_truth_score=gt_score,
+                ground_truth_reasoning=gt_reasoning,
             )
             db.add(result)
 
@@ -383,6 +390,8 @@ def _run_mock_eval(
                 "evidence": {k: "[MOCK]" for k in dim_scores},
                 "hallucination_flagged": hallucination_flagged,
                 "hallucination_reason": hallucination_reason,
+                "ground_truth_score": gt_score,
+                "ground_truth_reasoning": gt_reasoning,
                 "error": None,
             })
 
@@ -466,6 +475,17 @@ async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
         logger.info("[run=%s] STEP 2 — calling judge on %d results", run_id, len(succeeded))
         scored_results = await score_responses_parallel(model_results, rubric, judge_api_key)
 
+        # Step 2.5 — GT alignment scoring (only for results with expected_output)
+        from backend.judge.judge import score_ground_truth_parallel
+        has_gt = any(r.get("expected_output") for r in scored_results)
+        if has_gt:
+            logger.info("[run=%s] STEP 2.5 — scoring GT alignment for results with expected_output", run_id)
+            scored_results = await score_ground_truth_parallel(scored_results, judge_api_key)
+        else:
+            for r in scored_results:
+                r.setdefault("ground_truth_score", None)
+                r.setdefault("ground_truth_reasoning", None)
+
         judged = [r for r in scored_results if r.get("scores") and any(v is not None for v in r["scores"].values())]
         logger.info(
             "[run=%s] Judge done — %d/%d results have scores",
@@ -497,6 +517,8 @@ async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
                 tokens_in=r["tokens_in"],
                 tokens_out=r["tokens_out"],
                 cost_usd=r.get("cost_usd", 0.0),
+                ground_truth_score=r.get("ground_truth_score"),
+                ground_truth_reasoning=r.get("ground_truth_reasoning"),
             )
             db.add(mr)
         db.commit()
@@ -732,6 +754,75 @@ def start_eval_run(
     return EvalRunResponse(run_id=run_id, status="pending")
 
 
+# ── Story 2.6 — Run comparison helpers ────────────────────────────────────
+
+_COMPARE_DIMS = ["accuracy", "hallucination", "instruction_following", "conciseness"]
+
+
+def _calc_run_scores_and_costs(results) -> tuple[dict, dict]:
+    """
+    Return (scores_by_model, costs_by_model) from a list of ModelResult ORM rows.
+    scores_by_model: {model: {dim: avg_score}}
+    costs_by_model:  {model: total_cost_usd}
+    """
+    from collections import defaultdict
+    dim_sum: dict = defaultdict(lambda: defaultdict(float))
+    dim_cnt: dict = defaultdict(lambda: defaultdict(int))
+    cost_sum: dict = defaultdict(float)
+
+    for r in results:
+        m = r.model_name
+        cost_sum[m] += r.cost_usd or 0.0
+        for dim in _COMPARE_DIMS:
+            v = (r.dimension_scores or {}).get(dim)
+            if v is not None:
+                dim_sum[m][dim] += float(v)
+                dim_cnt[m][dim] += 1
+
+    scores = {
+        m: {
+            dim: round(dim_sum[m][dim] / dim_cnt[m][dim], 3) if dim_cnt[m][dim] > 0 else None
+            for dim in _COMPARE_DIMS
+        }
+        for m in dim_sum
+    }
+    costs = {m: round(cost_sum[m], 6) for m in cost_sum}
+    return scores, costs
+
+
+def _generate_compare_insight(score_delta: dict, shared_models: set) -> str:
+    """One-sentence insight derived from score deltas across shared models."""
+    from collections import defaultdict
+    if not shared_models:
+        return (
+            "No shared models between runs — comparison shows different model configurations."
+        )
+
+    dim_deltas: dict = defaultdict(list)
+    for m in shared_models:
+        if m in score_delta:
+            for dim in _COMPARE_DIMS:
+                d = score_delta[m].get(dim)
+                if d is not None:
+                    dim_deltas[dim].append(d)
+
+    if not dim_deltas:
+        return (
+            "Scores were consistent across both runs — model performance is stable on this dataset."
+        )
+
+    best_dim = max(dim_deltas, key=lambda d: sum(dim_deltas[d]) / len(dim_deltas[d]))
+    best_avg = sum(dim_deltas[best_dim]) / len(dim_deltas[best_dim])
+
+    if best_avg > 0.1:
+        dim_display = best_dim.replace("_", " ")
+        return (
+            f"{dim_display.capitalize()} improved by {best_avg:.1f} points between runs, "
+            f"suggesting prompt refinements had a positive impact on {dim_display} responses."
+        )
+    return "Scores were consistent across both runs — model performance is stable on this dataset."
+
+
 # ── Story 1.8 — Run history (static route BEFORE dynamic {run_id} routes) ─
 
 
@@ -796,6 +887,108 @@ def get_eval_history(
     return EvalHistoryResponse(runs=items, total=len(items))
 
 
+# ── Story 2.6 — Run comparison (static route BEFORE dynamic {run_id} routes) ─
+
+
+@router.get("/eval/compare")
+def compare_runs(
+    run_a: str,
+    run_b: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Compare two completed eval runs side-by-side.
+    Returns per-model dimension scores, costs, deltas, and an auto-insight sentence.
+    Models present in only one run show null deltas (not an error).
+    """
+    run_a_obj = db.query(EvalRun).filter(EvalRun.id == run_a).first()
+    run_b_obj = db.query(EvalRun).filter(EvalRun.id == run_b).first()
+
+    if not run_a_obj:
+        raise HTTPException(status_code=404, detail=f"Run '{run_a}' not found.")
+    if not run_b_obj:
+        raise HTTPException(status_code=404, detail=f"Run '{run_b}' not found.")
+
+    if run_a_obj.status != "complete":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Run A ('{run_a}') is not complete (status: {run_a_obj.status}). "
+                   "Both runs must be completed to compare.",
+        )
+    if run_b_obj.status != "complete":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Run B ('{run_b}') is not complete (status: {run_b_obj.status}). "
+                   "Both runs must be completed to compare.",
+        )
+
+    verdict_a = db.query(Verdict).filter(Verdict.eval_run_id == run_a).first()
+    verdict_b = db.query(Verdict).filter(Verdict.eval_run_id == run_b).first()
+
+    results_a = db.query(ModelResult).filter(ModelResult.eval_run_id == run_a).all()
+    results_b = db.query(ModelResult).filter(ModelResult.eval_run_id == run_b).all()
+
+    scores_a, costs_a = _calc_run_scores_and_costs(results_a)
+    scores_b, costs_b = _calc_run_scores_and_costs(results_b)
+
+    models_a = set(scores_a.keys())
+    models_b = set(scores_b.keys())
+    all_models = models_a | models_b
+    shared_models = models_a & models_b
+
+    # Compute per-model deltas (None for models missing from one run)
+    score_delta: dict = {}
+    cost_delta: dict = {}
+    for m in all_models:
+        if m in scores_a and m in scores_b:
+            score_delta[m] = {
+                dim: (
+                    round(scores_b[m][dim] - scores_a[m][dim], 3)
+                    if scores_a[m].get(dim) is not None and scores_b[m].get(dim) is not None
+                    else None
+                )
+                for dim in _COMPARE_DIMS
+            }
+            cost_delta[m] = round(costs_b.get(m, 0.0) - costs_a.get(m, 0.0), 6)
+        else:
+            score_delta[m] = {dim: None for dim in _COMPARE_DIMS}
+            cost_delta[m] = None
+
+    winner_a = verdict_a.winning_model if verdict_a else None
+    winner_b = verdict_b.winning_model if verdict_b else None
+    winner_changed = winner_a != winner_b
+
+    insight = _generate_compare_insight(score_delta, shared_models)
+
+    return {
+        "run_a": {
+            "id": run_a,
+            "label": run_a_obj.custom_label or f"Run {run_a[:8]}",
+            "date": _format_run_datetime(run_a_obj.created_at),
+            "models": run_a_obj.models_selected or [],
+            "winner": winner_a,
+            "scores": scores_a,
+            "costs": costs_a,
+        },
+        "run_b": {
+            "id": run_b,
+            "label": run_b_obj.custom_label or f"Run {run_b[:8]}",
+            "date": _format_run_datetime(run_b_obj.created_at),
+            "models": run_b_obj.models_selected or [],
+            "winner": winner_b,
+            "scores": scores_b,
+            "costs": costs_b,
+        },
+        "deltas": {
+            "score_delta": score_delta,
+            "cost_delta": cost_delta,
+            "verdict_changed": winner_changed,
+            "winner_changed": winner_changed,
+            "insight": insight,
+        },
+    }
+
+
 # ── Story 1.7 — Status polling ─────────────────────────────────────────────
 
 
@@ -847,6 +1040,8 @@ def get_eval_results(run_id: str, db: Session = Depends(get_db)):
             tokens_out=r.tokens_out,
             cost_usd=r.cost_usd,
             variance_score=r.variance_score,
+            ground_truth_score=r.ground_truth_score,
+            ground_truth_reasoning=r.ground_truth_reasoning,
         )
         for r in db_results
     ]

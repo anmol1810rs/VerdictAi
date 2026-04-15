@@ -31,6 +31,8 @@ def _migrate_add_columns() -> None:
     from sqlalchemy import text
     stmts = [
         "ALTER TABLE model_results ADD COLUMN variance_score REAL",
+        "ALTER TABLE model_results ADD COLUMN ground_truth_score REAL",
+        "ALTER TABLE model_results ADD COLUMN ground_truth_reasoning TEXT",
     ]
     with engine.connect() as conn:
         for stmt in stmts:

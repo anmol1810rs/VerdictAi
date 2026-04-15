@@ -172,14 +172,18 @@ def parse_judge_response(text: str) -> Optional[dict]:
 # ── Real judge API call ────────────────────────────────────────────────────
 
 
-async def _call_judge_api(user_prompt: str, api_key: str) -> str:
+async def _call_judge_api(
+    user_prompt: str,
+    api_key: str,
+    system_prompt: str = JUDGE_SYSTEM_PROMPT,
+) -> str:
     """Make a single call to the judge model via Responses API. Returns raw response text."""
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=api_key)
     response = await client.responses.create(
         model=JUDGE_API_MODEL_STRING,
-        instructions=JUDGE_SYSTEM_PROMPT,
+        instructions=system_prompt,
         input=[{"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}],
         temperature=0,
         max_output_tokens=1000,
@@ -297,5 +301,99 @@ async def score_responses_parallel(
             )
         else:
             enriched[idx].update(judge_out)
+
+    return enriched
+
+
+# ── Ground truth alignment scoring ────────────────────────────────────────
+
+_GT_SYSTEM_PROMPT = (
+    "You are an impartial judge evaluating how closely an AI response matches "
+    "a given expected output. Return only valid JSON."
+)
+
+
+def _build_gt_user_prompt(expected_output: str, response_text: str) -> str:
+    return (
+        f"On a scale of 0-10, how closely does this model response match the expected output?\n\n"
+        f"Expected:\n{expected_output}\n\n"
+        f"Response:\n{response_text}\n\n"
+        f'Return ONLY this JSON: {{"alignment_score": <0-10>, "alignment_reasoning": "<one sentence>"}}'
+    )
+
+
+async def score_ground_truth_async(
+    expected_output: str,
+    response_text: str,
+    api_key: str,
+) -> dict:
+    """
+    Score GT alignment for a single response (0-10).
+    In DEV_MODE returns a fixed mock score.
+    Returns {"ground_truth_score": float, "ground_truth_reasoning": str}.
+    """
+    if DEV_MODE:
+        return {
+            "ground_truth_score": 7.5,
+            "ground_truth_reasoning": (
+                "Response aligns with the expected output in substance and key facts."
+            ),
+        }
+
+    user_prompt = _build_gt_user_prompt(expected_output, response_text)
+    try:
+        raw = await _call_judge_api(user_prompt, api_key, system_prompt=_GT_SYSTEM_PROMPT)
+        data = json.loads(raw.strip().lstrip("```json").rstrip("```").strip())
+        score = min(10.0, max(0.0, float(data["alignment_score"])))
+        reasoning = str(data.get("alignment_reasoning", "")).strip()
+        return {"ground_truth_score": score, "ground_truth_reasoning": reasoning}
+    except Exception as exc:
+        logger.warning("GT scoring failed: %s", exc)
+        return {"ground_truth_score": None, "ground_truth_reasoning": None}
+
+
+async def score_ground_truth_parallel(
+    scored_results: list[dict],
+    api_key: str,
+) -> list[dict]:
+    """
+    Enrich each result that has expected_output with ground_truth_score and
+    ground_truth_reasoning.  Results without expected_output get None for both.
+    Returns a new list (does not mutate input).
+    """
+    tasks = []
+    indices = []
+
+    for i, r in enumerate(scored_results):
+        if r.get("expected_output") and not r.get("error"):
+            tasks.append(
+                score_ground_truth_async(r["expected_output"], r["response_text"], api_key)
+            )
+            indices.append(i)
+
+    enriched = [dict(r) for r in scored_results]
+
+    if not tasks:
+        for r in enriched:
+            r.setdefault("ground_truth_score", None)
+            r.setdefault("ground_truth_reasoning", None)
+        return enriched
+
+    gt_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for idx, gt_out in zip(indices, gt_results):
+        if isinstance(gt_out, Exception):
+            logger.error("GT gather error for result %d: %s", idx, gt_out)
+            enriched[idx]["ground_truth_score"] = None
+            enriched[idx]["ground_truth_reasoning"] = None
+        else:
+            enriched[idx].update(gt_out)
+
+    # Fill in None for results that had no expected_output
+    for r in enriched:
+        r.setdefault("ground_truth_score", None)
+        r.setdefault("ground_truth_reasoning", None)
+
+    return enriched
 
     return enriched

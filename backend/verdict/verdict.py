@@ -132,6 +132,7 @@ def generate_cost_comparison_callout(
     model_quality_scores: dict,
     model_total_costs: dict,
     model_ids: list,
+    hallucination_flagged_models: set | None = None,
 ) -> str:
     """
     Auto-generate a one-sentence cost comparison callout.
@@ -141,10 +142,15 @@ def generate_cost_comparison_callout(
       score_delta < 0.5 OR  cost_delta > $0.20  → "not worth it"
       otherwise                                  → neutral (state the numbers)
 
+    If the cheaper model is hallucination-flagged, the "not worth it" branch
+    replaces the pipeline recommendation with a hallucination risk warning.
+
     Public — tested directly.
     """
     if len(model_ids) < 2:
         return ""
+
+    flagged = hallucination_flagged_models or set()
 
     sorted_by_cost = sorted(model_ids, key=lambda m: model_total_costs.get(m, 0.0))
     cheapest = sorted_by_cost[0]
@@ -165,6 +171,12 @@ def generate_cost_comparison_callout(
             f"The premium is worth it for high-stakes annotation work."
         )
     if score_delta < _NOT_WORTH_IT_SCORE_DELTA or cost_delta > _NOT_WORTH_IT_COST_MIN:
+        if cheapest in flagged:
+            return (
+                f"{cheapest} delivers comparable quality at {cheaper_pct}% lower cost "
+                f"— however hallucination risk makes it unsuitable for production use "
+                f"despite lower cost."
+            )
         return (
             f"{cheapest} delivers comparable quality at {cheaper_pct}% lower cost "
             f"— recommended for high-volume pipelines."
@@ -180,6 +192,7 @@ def generate_cost_comparison_callout(
 def _build_cost_comparison(
     model_total_costs: dict,
     model_quality_scores: dict,
+    hallucination_flagged_models: set | None = None,
 ) -> dict:
     """Build cost_comparison JSON saved to DB and shown in UI. Includes callout."""
     comparison: dict = {}
@@ -191,7 +204,10 @@ def _build_cost_comparison(
             "cost_per_quality_point": cpp,
         }
     comparison["callout"] = generate_cost_comparison_callout(
-        model_quality_scores, model_total_costs, list(model_total_costs.keys())
+        model_quality_scores,
+        model_total_costs,
+        list(model_total_costs.keys()),
+        hallucination_flagged_models=hallucination_flagged_models,
     )
     return comparison
 
@@ -302,6 +318,31 @@ def save_variance_scores(
 # ── Verdict text generation ────────────────────────────────────────────────
 
 
+def build_gt_alignment_summary(scored_results: list) -> str:
+    """
+    Build one-line GT alignment sentence for the verdict.
+    Returns empty string if no results carry a ground_truth_score.
+    Public — tested directly.
+    """
+    gt_sum: dict = defaultdict(float)
+    gt_cnt: dict = defaultdict(int)
+    for r in scored_results:
+        gts = r.get("ground_truth_score")
+        if gts is not None:
+            mid = r["model_id"]
+            gt_sum[mid] += float(gts)
+            gt_cnt[mid] += 1
+    if not gt_cnt:
+        return ""
+    gt_avgs = {mid: gt_sum[mid] / gt_cnt[mid] for mid in gt_cnt}
+    best = max(gt_avgs, key=lambda m: gt_avgs[m])
+    avg = round(gt_avgs[best], 1)
+    return (
+        f"Against ground truth: {best} aligned most closely with expected outputs "
+        f"(avg alignment: {avg}/10)"
+    )
+
+
 def build_verdict_text(
     winning_model: str,
     final_score: float,
@@ -309,6 +350,7 @@ def build_verdict_text(
     top_dimensions: list[str],
     cost_insight: str,
     hallucination_warnings: list[str],
+    gt_summary: str = "",
 ) -> str:
     """
     Generate plain-language verdict text per PRD template.
@@ -331,6 +373,10 @@ def build_verdict_text(
     for warning in hallucination_warnings:
         lines.append("")
         lines.append(f"⚠️ {warning}")
+
+    if gt_summary:
+        lines.append("")
+        lines.append(gt_summary)
 
     return "\n".join(lines)
 
@@ -487,6 +533,8 @@ def generate_verdict(
 
     # ── Build verdict text ─────────────────────────────────────────────────
 
+    gt_summary = build_gt_alignment_summary(scored_results)
+
     summary = build_verdict_text(
         winning_model=winning_model,
         final_score=winning_score,
@@ -494,12 +542,15 @@ def generate_verdict(
         top_dimensions=top_dim_names,
         cost_insight=cost_insight,
         hallucination_warnings=hallucination_warnings,
+        gt_summary=gt_summary,
     )
 
     score_breakdown = _build_score_breakdown(
         model_quality_scores, model_cost_eff_scores, model_final_scores, rubric_config, model_dim_averages
     )
-    cost_comparison = _build_cost_comparison(model_total_costs, model_quality_scores)
+    cost_comparison = _build_cost_comparison(
+        model_total_costs, model_quality_scores, hallucination_flagged_models=disqualified
+    )
 
     # ── Save to DB ─────────────────────────────────────────────────────────
 

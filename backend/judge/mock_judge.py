@@ -43,6 +43,16 @@ def calculate_mock_cost(model_id: str, tokens: dict) -> float:
     return round((tokens["input"] + tokens["output"]) * 0.000002, 6)
 
 
+def get_mock_gt_score(expected_output: str | None) -> tuple:
+    """
+    Return (gt_score, gt_reasoning) when expected_output is present, else (None, None).
+    Used in DEV_MODE to avoid real judge API calls for GT scoring.
+    """
+    if not expected_output:
+        return None, None
+    return 7.5, "Response aligns with the expected output in substance and key facts."
+
+
 def calculate_cost_efficiency(cost_usd: float, weighted_score: float) -> float:
     """cost_efficiency = cost / weighted_score. Lower is better."""
     if weighted_score == 0:

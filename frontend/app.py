@@ -598,6 +598,76 @@ def _score_badge(score) -> str:
     return f"{score:.1f}"
 
 
+def _delta_color(delta) -> str:
+    """Return green / red / grey CSS color for a score delta."""
+    if delta is None:
+        return "#888888"
+    if delta > 0:
+        return "#2e7d32"   # green — improved
+    if delta < 0:
+        return "#c62828"   # red — regressed
+    return "#888888"       # grey — unchanged
+
+
+def _delta_badge(delta) -> str:
+    """Format delta as signed string, e.g. +1.2 or -0.5."""
+    if delta is None:
+        return "N/A"
+    sign = "+" if delta > 0 else ""
+    return f"{sign}{delta:.2f}"
+
+
+def _render_compare(compare_data: dict) -> None:
+    """Render the side-by-side run comparison view."""
+    run_a = compare_data["run_a"]
+    run_b = compare_data["run_b"]
+    deltas = compare_data["deltas"]
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown(f"**Run A:** {run_a['label']}")
+        st.caption(f"{run_a['date']} | Models: {', '.join(run_a['models'])}")
+        winner_a = run_a.get("winner") or "—"
+        st.markdown(f"🏆 Winner: **{winner_a}**")
+    with col_b:
+        st.markdown(f"**Run B:** {run_b['label']}")
+        st.caption(f"{run_b['date']} | Models: {', '.join(run_b['models'])}")
+        winner_b = run_b.get("winner") or "—"
+        st.markdown(f"🏆 Winner: **{winner_b}**")
+
+    if deltas.get("winner_changed"):
+        st.warning("⚡ Winner changed between runs.")
+
+    # Score delta table
+    st.markdown("**Score Deltas** (Run B − Run A, per model per dimension)")
+    score_delta = deltas.get("score_delta", {})
+    cost_delta = deltas.get("cost_delta", {})
+    all_compare_models = sorted(score_delta.keys())
+    compare_dims = ["accuracy", "hallucination", "instruction_following", "conciseness"]
+    dim_display = {
+        "accuracy": "Accuracy", "hallucination": "Hallucination",
+        "instruction_following": "Instruction", "conciseness": "Conciseness",
+    }
+
+    delta_rows = []
+    for m in all_compare_models:
+        row = {"Model": m}
+        for d in compare_dims:
+            v = score_delta.get(m, {}).get(d)
+            row[dim_display[d]] = _delta_badge(v)
+        cd = cost_delta.get(m)
+        row["Cost Δ (USD)"] = _delta_badge(cd) if cd is not None else "N/A"
+        delta_rows.append(row)
+
+    if delta_rows:
+        import pandas as pd
+        st.dataframe(pd.DataFrame(delta_rows), use_container_width=True, hide_index=True)
+
+    insight = deltas.get("insight", "")
+    if insight:
+        st.info(f"💡 {insight}")
+
+
 with tab_results:
     st.header("📊 Results")
 
@@ -663,6 +733,19 @@ with tab_results:
                                 dim_sum[m][d] += float(v)
                                 dim_cnt[m][d] += 1
 
+                    # GT Alignment: aggregate avg per model when GT scores present
+                    has_gt_data = any(
+                        r.get("ground_truth_score") is not None for r in results
+                    )
+                    gt_sum: dict = defaultdict(float)
+                    gt_cnt: dict = defaultdict(int)
+                    if has_gt_data:
+                        for r in results:
+                            gts = r.get("ground_truth_score")
+                            if gts is not None:
+                                gt_sum[r["model_name"]] += float(gts)
+                                gt_cnt[r["model_name"]] += 1
+
                     # Build table rows
                     table_rows = []
                     for m in all_models:
@@ -680,6 +763,9 @@ with tab_results:
                                 total += avg
                                 count += 1
                         row["Total"] = _score_badge(total / count if count else None)
+                        if has_gt_data:
+                            gt_avg = gt_sum[m] / gt_cnt[m] if gt_cnt[m] > 0 else None
+                            row["GT Alignment"] = _score_badge(gt_avg)
                         is_winner = verdict and m == verdict.get("winning_model")
                         row[""] = "🏆 Winner" if is_winner else ""
                         table_rows.append(row)
@@ -883,7 +969,68 @@ with tab_results:
                                                 f"{DIMENSION_DISPLAY.get(d, d)}: {_score_badge(v)}</span>",
                                                 unsafe_allow_html=True,
                                             )
+                                        gt_s = r.get("ground_truth_score")
+                                        gt_r = r.get("ground_truth_reasoning", "")
+                                        if gt_s is not None:
+                                            st.markdown(
+                                                f"<span style='color:{_score_color(gt_s)}'>"
+                                                f"GT Alignment: {gt_s:.1f}/10</span>",
+                                                unsafe_allow_html=True,
+                                            )
+                                            if gt_r:
+                                                st.caption(gt_r)
                                 st.divider()
 
         except requests.exceptions.ConnectionError:
             st.error("Cannot reach backend. Is the FastAPI server running?")
+
+    # ── 5. Compare Runs (Story 2.6) ───────────────────────────────────────
+    st.divider()
+    st.subheader("🔀 Compare Runs")
+    st.caption("Select two completed runs to see side-by-side score and cost deltas.")
+
+    try:
+        hist_r = requests.get(f"{BACKEND_URL}/eval/history", timeout=5)
+        if hist_r.status_code == 200:
+            all_hist_runs = hist_r.json().get("runs", [])
+            done_runs = [r for r in all_hist_runs if r["status"] == "complete"]
+            if len(done_runs) < 2:
+                st.info("Complete at least 2 eval runs to compare.")
+            else:
+                run_opts: dict = {}
+                for r in done_runs:
+                    lbl = r.get("run_label") or f"Run {r['id'][:8]}"
+                    run_opts[f"{lbl} — {r['created_at']}"] = r["id"]
+
+                cmp_col_a, cmp_col_b = st.columns(2)
+                with cmp_col_a:
+                    sel_a = st.selectbox("Run A", list(run_opts.keys()), key="cmp_run_a")
+                with cmp_col_b:
+                    default_b = min(1, len(run_opts) - 1)
+                    sel_b = st.selectbox(
+                        "Run B", list(run_opts.keys()), index=default_b, key="cmp_run_b"
+                    )
+
+                if st.button("Compare Runs", key="cmp_btn"):
+                    aid = run_opts[sel_a]
+                    bid = run_opts[sel_b]
+                    cmp_r = requests.get(
+                        f"{BACKEND_URL}/eval/compare",
+                        params={"run_a": aid, "run_b": bid},
+                        timeout=10,
+                    )
+                    if cmp_r.status_code == 200:
+                        st.session_state.compare_data = cmp_r.json()
+                    else:
+                        try:
+                            err_msg = cmp_r.json().get("detail", cmp_r.text)
+                        except Exception:
+                            err_msg = cmp_r.text
+                        st.error(f"Compare failed: {err_msg}")
+
+                if st.session_state.get("compare_data"):
+                    _render_compare(st.session_state.compare_data)
+        else:
+            st.caption("Could not load run history for comparison.")
+    except requests.exceptions.ConnectionError:
+        st.caption("Backend offline — comparison unavailable.")

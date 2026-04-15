@@ -112,6 +112,31 @@ class TestCostBreakdown:
             f"Expected cheaper model to be recommended: {callout_not}"
         )
 
+    def test_callout_suppresses_pipeline_recommendation_when_hallucination_flagged(self):
+        """
+        When the cheaper model is hallucination-flagged, the callout must NOT
+        recommend it for high-volume pipelines. Instead it must warn about
+        hallucination risk despite the lower cost.
+        """
+        from backend.verdict.verdict import generate_cost_comparison_callout
+
+        callout = generate_cost_comparison_callout(
+            model_quality_scores={"premium": 7.3, "budget": 7.2},   # "not worth it" branch
+            model_total_costs={"premium": 0.30, "budget": 0.05},
+            model_ids=["premium", "budget"],
+            hallucination_flagged_models={"budget"},
+        )
+
+        assert "hallucination" in callout.lower(), (
+            f"Expected hallucination warning in callout: {callout}"
+        )
+        assert "recommended for high-volume" not in callout.lower(), (
+            f"Should NOT recommend flagged model for pipelines: {callout}"
+        )
+        assert "unsuitable for production" in callout.lower(), (
+            f"Expected production unsuitability warning: {callout}"
+        )
+
     def test_prices_last_updated_readable(self):
         """
         pricing.yaml must have a meta.last_updated key that is a non-empty string.

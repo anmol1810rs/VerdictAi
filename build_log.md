@@ -2,6 +2,62 @@
 
 ---
 
+## Session 6 — 2026-04-14
+
+**Goal:** Stories 2.5 (Ground Truth Comparison) and 2.6 (Historical Run Comparison).
+
+**Stories completed:** 2.5 ✓, 2.6 ✓
+
+**New files:**
+- `backend/tests/test_session_6.py` — 13 new acceptance tests (6 GT, 7 compare)
+
+**DB schema changes (migration runs automatically):**
+- `ModelResult.ground_truth_score` (Float, nullable) — alignment score 0-10 vs expected_output; null if no GT
+- `ModelResult.ground_truth_reasoning` (Text, nullable) — one-sentence GT reasoning from judge; null if no GT
+- `database.py._migrate_add_columns()` — extended with the two new ALTER TABLE statements
+
+**Backend additions:**
+
+`backend/judge/mock_judge.py`:
+- `get_mock_gt_score(expected_output)` — returns (7.5, reasoning) when GT present, (None, None) when absent
+
+`backend/judge/judge.py`:
+- `_call_judge_api()` — gained optional `system_prompt` param (non-breaking)
+- `_GT_SYSTEM_PROMPT`, `_build_gt_user_prompt()` — GT-specific judge prompt (asks alignment 0-10)
+- `score_ground_truth_async()` — makes second judge call for GT alignment; DEV_MODE returns fixed 7.5
+- `score_ground_truth_parallel()` — enriches all results that have expected_output; fills None for the rest
+
+`backend/verdict/verdict.py`:
+- `build_gt_alignment_summary(scored_results)` — returns "Against ground truth: {best_model} aligned most closely…" sentence; empty string if no GT data
+- `build_verdict_text()` — gained `gt_summary=""` param; appended to verdict text when present
+
+`backend/eval/router.py`:
+- `_run_mock_eval()` — calls `get_mock_gt_score()` per prompt; saves `ground_truth_score/reasoning` to ModelResult and scored_results dicts
+- `_run_real_eval_async()` Step 2.5 — calls `score_ground_truth_parallel()` after judge; saves GT fields to ModelResult in Step 3
+- `get_eval_results` — `ModelResultOut` now includes `ground_truth_score` and `ground_truth_reasoning`
+- `_calc_run_scores_and_costs()` — helper: aggregates per-model dim averages + total costs from ModelResult rows
+- `_generate_compare_insight()` — finds best-improving dimension across shared models; returns one-sentence insight
+- `GET /eval/compare` — new endpoint; returns run_a, run_b summaries + deltas (score_delta, cost_delta, winner_changed, insight); models only in one run get None deltas, not errors
+
+`backend/eval/schemas.py`:
+- `ModelResultOut` — gained `ground_truth_score: Optional[float]` and `ground_truth_reasoning: Optional[str]`
+
+**Frontend additions (`frontend/app.py`):**
+- `_delta_color()`, `_delta_badge()` — helpers for signed delta display (green/red/grey)
+- `_render_compare()` — renders side-by-side run comparison: headers, winner badge, score delta table, insight callout
+- Score Breakdown table — adds "GT Alignment" column when any result has a non-null GT score
+- Per-prompt breakdown — shows "GT Alignment: X.X/10" + reasoning caption under scores when present
+- Compare Runs section (below per-prompt breakdown) — two run dropdowns, Compare button, renders `_render_compare()`
+
+**Decisions differing from PRD:**
+- GT alignment judge prompt sent as a *second* judge API call (per PRD spec). In DEV_MODE this returns a fixed mock score of 7.5 with canned reasoning rather than calling the real API.
+- The PRD test `test_gt_column_absent_when_no_gt` specifies "completely absent"; implementation sets `ground_truth_score=null` in the JSON response. The UI checks `is not None` before rendering, so no N/A values appear — the spirit of "completely absent" is preserved.
+- `verdict_changed` and `winner_changed` in the compare response are set to the same value (winning model changed). A full diff of the summary text was considered but is less actionable.
+
+**Test count:** 121 (prior) + 13 (Session 6) = **134 total, all passing**
+
+---
+
 ## Session 5 — 2026-04-13
 
 **Goal:** Stories 2.3 (Cost Breakdown Enhancement) and 2.4 (Prompt Variance Analysis).

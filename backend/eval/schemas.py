@@ -120,6 +120,8 @@ class ModelResultOut(BaseModel):
     tokens_out: Optional[int] = None        # direct column for export (S7)
     cost_usd: float
     variance_score: Optional[float] = None  # max-min weighted score across models for this prompt
+    ground_truth_score: Optional[float] = None     # 0-10 alignment vs expected_output; null if no GT
+    ground_truth_reasoning: Optional[str] = None   # one-sentence GT reasoning; null if no GT
 
 
 class EvalRunResponse(BaseModel):
