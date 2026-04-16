@@ -2,6 +2,65 @@
 
 ---
 
+## Session 7 — 2026-04-15
+
+**Goal:** Stories 3.1 (PDF Export) and 3.2 (JSON Export). Final feature session before deployment.
+
+**Stories completed:** 3.1 ✓, 3.2 ✓
+
+**New files:**
+- `backend/export/__init__.py` — module marker
+- `backend/export/pdf_exporter.py` — ReportLab PDF generator (Story 3.1)
+- `backend/export/json_exporter.py` — canonical JSON report builder (Story 3.2)
+- `backend/tests/test_session_7.py` — 16 new acceptance tests (7 PDF, 9 JSON)
+
+**Dependencies added:**
+- `pdfplumber` (test dependency — used to extract text and count pages in PDF tests)
+
+**Backend additions:**
+
+`backend/export/pdf_exporter.py`:
+- `generate_pdf_bytes(run_id, db)` — returns bytes for a white, ≤2-page PDF
+- Page 1: VerdictAI header (run label, date, modality, models) → VERDICT section (winner, score, summary text, hallucination warnings) → SCORE BREAKDOWN table → COST BREAKDOWN table (with pricing last-updated caption and cost-comparison callout)
+- Page 2: PER-PROMPT BREAKDOWN (top 5 prompts by variance, high-variance badge, per-model score + truncated reasoning table) → GT ALIGNMENT table (only when GT data exists) → footer with VerdictAI branding
+- Styling: Helvetica fonts (title=18, headers=12, body=9), green winner rows, amber warnings, alternating row shading, 0.5-inch margins on LETTER page
+- "Showing top 5 of N prompts. Full data available in JSON export." note when run has >5 prompts
+
+`backend/export/json_exporter.py`:
+- `generate_json_report(run_id, db)` — returns full schema dict
+- Top-level keys: `verdictai_version` ("1.0.0"), `exported_at`, `run`, `verdict`, `models`, `prompts`
+- `run` section: id, label, created_at, completed_at, modality, models_selected, rubric_config (preset auto-detected), engineer_names
+- `verdict` section: winning_model, overall_score, summary, hallucination_warnings, gt_alignment_summary (null or {best_model, avg_score})
+- `models` section: per-model avg_scores (all 4 dims + cost_efficiency + total) and cost (total_usd, tokens_in, tokens_out, cost_per_1k_tokens, cost_per_quality_point)
+- `prompts` section: per prompt — index, prompt_text, engineer_name, expected_output, variance_score, high_variance, responses (per model: response_text, scores with reasoning, GT fields, hallucination_flagged, tokens, cost_usd)
+
+`backend/eval/router.py`:
+- `GET /eval/{run_id}/export/pdf` — calls `generate_pdf_bytes`, returns `application/pdf` with `Content-Disposition: attachment; filename="verdictai_{label}.pdf"`; 404 if run not found, 400 if not complete
+- `GET /eval/{run_id}/export/json` — calls `generate_json_report`, returns `application/json` with `Content-Disposition: attachment; filename="verdictai_{label}_{YYYYMMDD}.json"`; both routes placed before `{run_id}/status` to avoid routing conflicts
+
+**Frontend additions (`frontend/app.py`):**
+- Export section (§5) inserted between per-prompt breakdown and Compare Runs
+- `📄 Export PDF` button — calls PDF endpoint, shows `st.download_button` with PDF bytes on success; disabled until run is `complete`
+- `📋 Export JSON` button — calls JSON endpoint, shows `st.download_button` with correct filename from `Content-Disposition`; disabled until run is `complete`
+- "Copy to clipboard" expander — shows first 3000 chars of JSON in `st.code()` block (Streamlit's native copy icon)
+- Status check via `/eval/{run_id}/status` before enabling buttons (no orphaned state across page refreshes)
+
+**Decisions:**
+- PDF uses ReportLab Platypus `SimpleDocTemplate` (not canvas) for automatic reflow and page-break management
+- `pdfplumber` chosen for tests over PyPDF2 — more reliable text extraction for styled PDFs
+- Per-prompt reasoning truncated to 30 chars per cell (8pt font) to guarantee ≤2 pages for 10-prompt runs
+- GT section completely absent from PDF when no GT provided (not shown as empty table)
+- JSON `rubric_config.preset` auto-detected by comparing weights against models.yaml presets; falls back to "custom"
+- `verdictai_version` hardcoded as "1.0.0" in `json_exporter.VERDICTAI_VERSION`
+
+**Integration test:** Requires running `uvicorn + streamlit` with `DEV_MODE=false` and a real OpenAI key. Manual checklist from PRD is ready to verify against. All automated tests pass.
+
+**Test count:** 134 (prior) + 16 (Session 7) = **150 total, all passing**
+
+**Ready for deployment:** Yes — all stories 1.1–3.2 complete. Run `pytest backend/tests/` to verify 150/150 before shipping.
+
+---
+
 ## Session 6 — 2026-04-14
 
 **Goal:** Stories 2.5 (Ground Truth Comparison) and 2.6 (Historical Run Comparison).
