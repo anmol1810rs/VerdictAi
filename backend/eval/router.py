@@ -1,16 +1,18 @@
 """
-eval/router.py — Session 1-6 endpoints.
+eval/router.py — Session 1-7 endpoints.
 
 Implements:
-  POST /upload                  — parse CSV/JSONL/ZIP, validate fully (S1.6), return modality (S1.5)
-  GET  /models/compatible       — return compatible/incompatible models for a modality (S1.5)
-  POST /rubric/validate         — validate rubric weights
-  POST /keys/validate           — validate API key format
-  POST /eval/run                — create run immediately with status=pending, execute via BackgroundTask (S1.7)
-  GET  /eval/history            — list all runs ordered by recency with filters (S1.8)
-  GET  /eval/{run_id}/status    — poll run status (S1.7)
-  GET  /eval/{run_id}/results   — fetch stored results
-  GET  /eval/compare            — compare two completed runs side-by-side (S2.6)
+  POST /upload                   — parse CSV/JSONL/ZIP, validate fully (S1.6), return modality (S1.5)
+  GET  /models/compatible        — return compatible/incompatible models for a modality (S1.5)
+  POST /rubric/validate          — validate rubric weights
+  POST /keys/validate            — validate API key format
+  POST /eval/run                 — create run immediately with status=pending, execute via BackgroundTask (S1.7)
+  GET  /eval/history             — list all runs ordered by recency with filters (S1.8)
+  GET  /eval/compare             — compare two completed runs side-by-side (S2.6)
+  GET  /eval/{run_id}/status     — poll run status (S1.7)
+  GET  /eval/{run_id}/results    — fetch stored results
+  GET  /eval/{run_id}/export/pdf — PDF export (S3.1)
+  GET  /eval/{run_id}/export/json— JSON export (S3.2)
 """
 import asyncio
 import csv
@@ -987,6 +989,80 @@ def compare_runs(
             "insight": insight,
         },
     }
+
+
+# ── Story 3.1 — PDF export (static sub-route BEFORE {run_id} dynamic routes) ─
+
+
+@router.get("/eval/{run_id}/export/pdf")
+def export_pdf(run_id: str, db: Session = Depends(get_db)):
+    """
+    Generate and return a PDF evaluation report for a completed run.
+    Max 2 pages. Per-prompt section shows top 5 prompts by variance score.
+    """
+    from fastapi.responses import Response
+    from backend.export.pdf_exporter import generate_pdf_bytes
+
+    run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    if run.status != "complete":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Run is not complete (status: {run.status}). "
+                   "PDF export is only available for completed runs.",
+        )
+
+    try:
+        pdf_bytes = generate_pdf_bytes(run_id, db)
+    except Exception as exc:
+        logger.exception("[run=%s] PDF export failed: %s", run_id, exc)
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}") from exc
+
+    label = (run.custom_label or run_id[:8]).replace(" ", "_")
+    filename = f"verdictai_{label}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Story 3.2 — JSON export ────────────────────────────────────────────────
+
+
+@router.get("/eval/{run_id}/export/json")
+def export_json(run_id: str, db: Session = Depends(get_db)):
+    """
+    Generate and return the canonical JSON export for a completed eval run.
+    Content-Disposition filename: verdictai_{label}_{date}.json
+    """
+    from fastapi.responses import JSONResponse
+    from backend.export.json_exporter import generate_json_report
+
+    run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    if run.status != "complete":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Run is not complete (status: {run.status}). "
+                   "JSON export is only available for completed runs.",
+        )
+
+    try:
+        payload = generate_json_report(run_id, db)
+    except Exception as exc:
+        logger.exception("[run=%s] JSON export failed: %s", run_id, exc)
+        raise HTTPException(status_code=500, detail=f"JSON export failed: {exc}") from exc
+
+    label = (run.custom_label or run_id[:8]).replace(" ", "_")
+    date_str = run.created_at.strftime("%Y%m%d") if run.created_at else "unknown"
+    filename = f"verdictai_{label}_{date_str}.json"
+    return JSONResponse(
+        content=payload,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Story 1.7 — Status polling ─────────────────────────────────────────────

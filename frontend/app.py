@@ -984,7 +984,107 @@ with tab_results:
         except requests.exceptions.ConnectionError:
             st.error("Cannot reach backend. Is the FastAPI server running?")
 
-    # ── 5. Compare Runs (Story 2.6) ───────────────────────────────────────
+    # ── 5. Export (Story 3.1 & 3.2) ──────────────────────────────────────
+    st.divider()
+    st.subheader("📤 Export Results")
+
+    run_id_for_export = st.session_state.get("last_run_id")
+    _export_complete  = False
+
+    # Check if the current run is complete before enabling export
+    if run_id_for_export:
+        try:
+            _st_resp = requests.get(
+                f"{BACKEND_URL}/eval/{run_id_for_export}/status", timeout=5
+            )
+            if _st_resp.status_code == 200:
+                _export_complete = _st_resp.json().get("status") == "complete"
+        except requests.exceptions.ConnectionError:
+            pass
+
+    _exp_col_pdf, _exp_col_json, _exp_col_clip = st.columns([1, 1, 2])
+
+    with _exp_col_pdf:
+        if st.button(
+            "📄 Export PDF",
+            disabled=not _export_complete,
+            key="btn_export_pdf",
+            help="Download a 2-page PDF report for this evaluation run.",
+        ):
+            with st.spinner("Generating PDF…"):
+                try:
+                    _pdf_resp = requests.get(
+                        f"{BACKEND_URL}/eval/{run_id_for_export}/export/pdf",
+                        timeout=30,
+                    )
+                    if _pdf_resp.status_code == 200:
+                        st.download_button(
+                            label="📄 Download PDF",
+                            data=_pdf_resp.content,
+                            file_name=f"verdictai_{run_id_for_export[:8]}.pdf",
+                            mime="application/pdf",
+                            key="dl_pdf",
+                        )
+                    else:
+                        try:
+                            _err = _pdf_resp.json().get("detail", _pdf_resp.text)
+                        except Exception:
+                            _err = _pdf_resp.text
+                        st.error(f"PDF export failed: {_err}")
+                except requests.exceptions.ConnectionError:
+                    st.error("Cannot reach backend.")
+
+    with _exp_col_json:
+        if st.button(
+            "📋 Export JSON",
+            disabled=not _export_complete,
+            key="btn_export_json",
+            help="Download the full structured JSON export for this evaluation run.",
+        ):
+            with st.spinner("Building JSON…"):
+                try:
+                    _json_resp = requests.get(
+                        f"{BACKEND_URL}/eval/{run_id_for_export}/export/json",
+                        timeout=30,
+                    )
+                    if _json_resp.status_code == 200:
+                        _cd = _json_resp.headers.get("content-disposition", "")
+                        import re as _re
+                        _fname_match = _re.search(r'filename="([^"]+)"', _cd)
+                        _json_fname = (
+                            _fname_match.group(1) if _fname_match
+                            else f"verdictai_{run_id_for_export[:8]}.json"
+                        )
+                        st.download_button(
+                            label="📋 Download JSON",
+                            data=_json_resp.content,
+                            file_name=_json_fname,
+                            mime="application/json",
+                            key="dl_json",
+                        )
+                        # Store JSON in session for clipboard copy
+                        st.session_state["export_json_text"] = _json_resp.text
+                    else:
+                        try:
+                            _err = _json_resp.json().get("detail", _json_resp.text)
+                        except Exception:
+                            _err = _json_resp.text
+                        st.error(f"JSON export failed: {_err}")
+                except requests.exceptions.ConnectionError:
+                    st.error("Cannot reach backend.")
+
+    with _exp_col_clip:
+        if st.session_state.get("export_json_text"):
+            with st.expander("📋 Copy JSON to clipboard"):
+                st.code(st.session_state["export_json_text"][:3000], language="json")
+                st.caption("Use the copy icon above to copy the JSON to your clipboard.")
+
+    if not _export_complete and run_id_for_export:
+        st.caption("Export buttons are enabled once the evaluation run is complete.")
+    elif not run_id_for_export:
+        st.caption("Run an evaluation first to enable exports.")
+
+    # ── 6. Compare Runs (Story 2.6) ───────────────────────────────────────
     st.divider()
     st.subheader("🔀 Compare Runs")
     st.caption("Select two completed runs to see side-by-side score and cost deltas.")
