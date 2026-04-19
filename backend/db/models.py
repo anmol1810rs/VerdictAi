@@ -60,6 +60,10 @@ class ModelResult(Base):
     variance_score = Column(Float, nullable=True)         # max-min weighted score across models for this prompt
     ground_truth_score = Column(Float, nullable=True)     # alignment score 0-10 vs expected_output (null if no GT)
     ground_truth_reasoning = Column(Text, nullable=True)  # one-sentence reasoning from GT judge
+    rouge_1_score = Column(Float, nullable=True)          # ROUGE-1 F1 word overlap (null if no GT)
+    rouge_l_score = Column(Float, nullable=True)          # ROUGE-L F1 longest-common-subsequence (null if no GT)
+    evidence_data = Column(JSON, nullable=True)           # judge evidence per dimension: {dim: "quoted text"}
+    model_error = Column(Text, nullable=True)             # runner error message if API call failed
 
 
 class Verdict(Base):

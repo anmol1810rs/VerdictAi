@@ -161,7 +161,7 @@ def generate_json_report(run_id: str, db) -> dict:
         for r in p_results:
             ds = r.dimension_scores or {}
             dr = r.dimension_reasoning or {}
-            de = {}  # evidence if stored (currently "[MOCK]" in dev mode)
+            de = r.evidence_data or {}
             scores_dict: dict = {}
             for d in DIMS:
                 scores_dict[d] = {
@@ -175,6 +175,8 @@ def generate_json_report(run_id: str, db) -> dict:
                 "scores":                scores_dict,
                 "ground_truth_score":    r.ground_truth_score,
                 "ground_truth_reasoning":r.ground_truth_reasoning,
+                "rouge_1_score":         r.rouge_1_score,
+                "rouge_l_score":         r.rouge_l_score,
                 "hallucination_flagged": r.hallucination_flagged,
                 "tokens_in":             r.tokens_in,
                 "tokens_out":            r.tokens_out,

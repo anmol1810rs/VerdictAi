@@ -122,6 +122,9 @@ class ModelResultOut(BaseModel):
     variance_score: Optional[float] = None  # max-min weighted score across models for this prompt
     ground_truth_score: Optional[float] = None     # 0-10 alignment vs expected_output; null if no GT
     ground_truth_reasoning: Optional[str] = None   # one-sentence GT reasoning; null if no GT
+    rouge_1_score: Optional[float] = None          # ROUGE-1 F1 word overlap; null if no GT
+    rouge_l_score: Optional[float] = None          # ROUGE-L F1 LCS-based; null if no GT
+    model_error: Optional[str] = None  # runner error if API call failed
 
 
 class EvalRunResponse(BaseModel):
@@ -132,6 +135,7 @@ class EvalRunResponse(BaseModel):
 class EvalResultsResponse(BaseModel):
     run_id: str
     status: str
+    modality: str = "text"
     results: list[ModelResultOut]
     verdict: Optional[dict] = None
 
@@ -143,6 +147,7 @@ class EvalStatusResponse(BaseModel):
     status: str                          # pending | running | complete | failed
     error_message: Optional[str] = None
     completed_at: Optional[str] = None  # ISO string, set on complete/failed
+    progress_pct: Optional[float] = None  # 0-100, updated during eval execution
 
 
 # ── Story 1.8 — Run history ────────────────────────────────────────────────

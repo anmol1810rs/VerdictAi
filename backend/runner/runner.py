@@ -18,9 +18,9 @@ from typing import Optional
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 try:
-    import google.generativeai as _genai_module
+    from google import genai as _google_genai
 except Exception:  # noqa: BLE001 — optional dependency
-    _genai_module = None  # type: ignore[assignment]
+    _google_genai = None  # type: ignore[assignment]
 
 import logging
 
@@ -116,23 +116,31 @@ async def _call_google(
     model_config: dict, prompt_text: str, image_data: Optional[str], api_key: str
 ) -> tuple[str, int, int]:
     """
-    Call Google Gemini generate_content_async.
-    image_format: inline_data → {"mime_type": "...", "data": b64_bytes}
+    Call Google Gemini via google-genai SDK (replaces deprecated google-generativeai).
+    image_format: inline bytes → types.Part.from_bytes(data=..., mime_type=...)
     """
-    if _genai_module is None:
-        raise ImportError("google-generativeai is not installed")
-    _genai_module.configure(api_key=api_key)
-    model = _genai_module.GenerativeModel(model_config["api_model_string"])
+    if _google_genai is None:
+        raise ImportError("google-genai is not installed")
+
+    from google.genai import types as _gtypes
+
+    client = _google_genai.Client(api_key=api_key)
 
     if image_data and "," in image_data:
         header, b64 = image_data.split(",", 1)
         mime = header.split(":")[1].split(";")[0]
         image_bytes = base64.b64decode(b64)
-        content = [prompt_text, {"mime_type": mime, "data": image_bytes}]
+        contents = [
+            _gtypes.Part.from_text(text=prompt_text),
+            _gtypes.Part.from_bytes(data=image_bytes, mime_type=mime),
+        ]
     else:
-        content = [prompt_text]
+        contents = prompt_text
 
-    response = await model.generate_content_async(content)
+    response = await client.aio.models.generate_content(
+        model=model_config["api_model_string"],
+        contents=contents,
+    )
 
     text = response.text
     tokens_in = response.usage_metadata.prompt_token_count

@@ -268,6 +268,26 @@ def _format_run_datetime(dt: Optional[datetime]) -> str:
     return dt.strftime(f"%d %b %Y, {hour_12}:{minute}{ampm}")
 
 
+# ── ROUGE scoring helper ───────────────────────────────────────────────────
+
+
+def _calc_rouge_scores(response_text: str, expected_output: str) -> tuple:
+    """
+    Calculate ROUGE-1 and ROUGE-L F1 scores using the rouge-score library.
+    Pure Python, no API call. Returns (rouge_1_f1, rouge_l_f1) or (None, None) on error.
+    """
+    try:
+        from rouge_score import rouge_scorer as _rs
+        scorer = _rs.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+        scores = scorer.score(expected_output, response_text)
+        return (
+            round(scores["rouge1"].fmeasure, 4),
+            round(scores["rougeL"].fmeasure, 4),
+        )
+    except Exception:
+        return (None, None)
+
+
 # ── Story 1.7/2.1/2.2 — Background eval execution ──────────────────────────
 
 
@@ -357,6 +377,13 @@ def _run_mock_eval(
             # Ground truth alignment (mock — only when expected_output present)
             gt_score, gt_reasoning = get_mock_gt_score(prompt_rec.expected_output)
 
+            # ROUGE scores — pure Python, no API cost
+            rouge_1, rouge_l = (
+                _calc_rouge_scores(response_text, prompt_rec.expected_output)
+                if prompt_rec.expected_output
+                else (None, None)
+            )
+
             result = ModelResult(
                 id=str(uuid.uuid4()),
                 eval_run_id=run_id,
@@ -374,6 +401,9 @@ def _run_mock_eval(
                 cost_usd=cost_usd,
                 ground_truth_score=gt_score,
                 ground_truth_reasoning=gt_reasoning,
+                rouge_1_score=rouge_1,
+                rouge_l_score=rouge_l,
+                evidence_data={k: "[MOCK]" for k in dim_scores},
             )
             db.add(result)
 
@@ -394,6 +424,8 @@ def _run_mock_eval(
                 "hallucination_reason": hallucination_reason,
                 "ground_truth_score": gt_score,
                 "ground_truth_reasoning": gt_reasoning,
+                "rouge_1_score": rouge_1,
+                "rouge_l_score": rouge_l,
                 "error": None,
             })
 
@@ -504,6 +536,12 @@ async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
         logger.info("[run=%s] STEP 3 — saving %d ModelResult rows", run_id, len(scored_results))
         for r in scored_results:
             dim_scores = r.get("scores", {})
+            # ROUGE scores — pure Python, no API cost
+            rouge_1, rouge_l = (
+                _calc_rouge_scores(r.get("response_text", ""), r["expected_output"])
+                if r.get("expected_output")
+                else (None, None)
+            )
             mr = ModelResult(
                 id=str(uuid.uuid4()),
                 eval_run_id=run_id,
@@ -521,6 +559,10 @@ async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
                 cost_usd=r.get("cost_usd", 0.0),
                 ground_truth_score=r.get("ground_truth_score"),
                 ground_truth_reasoning=r.get("ground_truth_reasoning"),
+                rouge_1_score=rouge_1,
+                rouge_l_score=rouge_l,
+                evidence_data=r.get("evidence") or {},
+                model_error=r.get("error"),
             )
             db.add(mr)
         db.commit()
@@ -718,11 +760,14 @@ def start_eval_run(
     # Collect unique engineer names from prompt-level data
     engineer_names = list({p.engineer_name for p in request.prompts if p.engineer_name})
 
+    # Detect modality from prompts — image_data present → image_text, else text
+    modality = "image_text" if any(p.image_data for p in request.prompts) else "text"
+
     # Persist run with status=pending — this is the immediate commit
     run = EvalRun(
         id=run_id,
         created_at=datetime.now(timezone.utc),
-        modality="text",  # client provides modality; default text for backward compat
+        modality=modality,
         rubric_config=request.rubric.model_dump(),
         models_selected=request.models_selected,
         engineer_name=request.engineer_name,
@@ -1065,6 +1110,56 @@ def export_json(run_id: str, db: Session = Depends(get_db)):
     )
 
 
+# ── Image serving (static sub-sub-route BEFORE {run_id} dynamic routes) ──────
+
+
+@router.get("/eval/{run_id}/image/{prompt_index}")
+def get_prompt_image(run_id: str, prompt_index: int, db: Session = Depends(get_db)):
+    """
+    Return the raw image bytes for the given prompt in an image_text run.
+    Decodes the base64 data URI stored in the Prompt record.
+    Returns 404 if the run, prompt, or image data are not found.
+    """
+    import base64 as _base64
+    from fastapi.responses import Response as _Response
+
+    # Locate any ModelResult for this run + prompt_index to get the prompt_id
+    result = (
+        db.query(ModelResult)
+        .filter(
+            ModelResult.eval_run_id == run_id,
+            ModelResult.prompt_index == str(prompt_index),
+        )
+        .first()
+    )
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Prompt index {prompt_index} not found for run '{run_id}'.",
+        )
+
+    prompt = db.query(Prompt).filter(Prompt.id == result.prompt_id).first()
+    if not prompt or not prompt.image_data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No image data for prompt {prompt_index} in run '{run_id}'.",
+        )
+
+    # Decode "data:{mime};base64,{b64}" → raw bytes
+    data_uri = prompt.image_data
+    if not data_uri.startswith("data:"):
+        raise HTTPException(status_code=500, detail="Stored image data has unexpected format.")
+
+    try:
+        header, b64_content = data_uri.split(",", 1)
+        mime = header.split(":")[1].split(";")[0]   # e.g. "image/jpeg"
+        image_bytes = _base64.b64decode(b64_content)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to decode image: {exc}") from exc
+
+    return _Response(content=image_bytes, media_type=mime)
+
+
 # ── Story 1.7 — Status polling ─────────────────────────────────────────────
 
 
@@ -1080,6 +1175,7 @@ def get_eval_status(run_id: str, db: Session = Depends(get_db)):
         status=run.status,
         error_message=run.error_message,
         completed_at=run.completed_at.isoformat() if run.completed_at else None,
+        progress_pct=run.progress_pct,
     )
 
 
@@ -1118,6 +1214,9 @@ def get_eval_results(run_id: str, db: Session = Depends(get_db)):
             variance_score=r.variance_score,
             ground_truth_score=r.ground_truth_score,
             ground_truth_reasoning=r.ground_truth_reasoning,
+            rouge_1_score=r.rouge_1_score,
+            rouge_l_score=r.rouge_l_score,
+            model_error=r.model_error,
         )
         for r in db_results
     ]
@@ -1135,6 +1234,7 @@ def get_eval_results(run_id: str, db: Session = Depends(get_db)):
     return EvalResultsResponse(
         run_id=run_id,
         status=run.status,
+        modality=run.modality or "text",
         results=results_out,
         verdict=verdict_out,
     )

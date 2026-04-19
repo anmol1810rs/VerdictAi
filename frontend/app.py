@@ -129,6 +129,13 @@ with st.sidebar:
     else:
         st.warning("OpenAI key required to run evaluations.")
 
+    st.info(
+        "ℹ️ **OpenAI key is always required** — it powers the judge model "
+        f"({models_cfg.get('judge', {}).get('default_model', 'gpt-5-4')}) "
+        "that scores every response. This applies even if you only select "
+        "Anthropic or Google models for the eval itself."
+    )
+
     st.caption("💡 Google Gemini has a **free tier** — 1,000 requests/day, no credit card required.")
 
     # ── Run History (Story 1.8) ───────────────────────────────────────────
@@ -496,10 +503,13 @@ with tab_run:
 
                 if current_status == "pending":
                     st.info("🔄 Run queued...")
+                    st.progress(0, text="Waiting to start…")
                     time.sleep(2)
                     st.rerun()
                 elif current_status == "running":
-                    st.info("⏳ Evaluation in progress... (refreshing every 2s)")
+                    pct = status_data.get("progress_pct") or 0.0
+                    progress_val = max(0.0, min(1.0, pct / 100.0))
+                    st.progress(progress_val, text=f"⏳ Evaluating… {int(pct)}% complete")
                     time.sleep(2)
                     st.rerun()
                 elif current_status == "complete":
@@ -687,26 +697,63 @@ with tab_results:
                 data = resp.json()
                 results = data.get("results", [])
                 verdict = data.get("verdict")
+                run_modality = data.get("modality", "text")
 
                 # ── 1. Verdict Card ────────────────────────────────────────────
                 if verdict:
                     winning_model = verdict.get("winning_model", "Unknown")
                     summary = verdict.get("summary", "")
-                    warnings = verdict.get("hallucination_warnings", [])
+
+                    # Determine hallucination state from raw results
+                    flagged_models = {
+                        r["model_name"] for r in results if r.get("hallucination_flagged")
+                    }
+                    all_models_set = {r["model_name"] for r in results}
+                    all_flagged = bool(flagged_models) and (flagged_models >= all_models_set)
+
+                    # Build warning HTML block (lives inside the card — no duplicate banners)
+                    warning_html = ""
+                    if all_flagged:
+                        warning_html = (
+                            "<div style='background:#7f1d1d;border-left:4px solid #f87171;"
+                            "padding:10px 14px;border-radius:4px;margin-top:12px'>"
+                            "<span style='color:#fca5a5'>⚠️ Note: All models showed hallucination "
+                            "signals on this dataset. Consider reviewing prompts or using "
+                            "ground truth validation.</span></div>"
+                        )
+                    elif flagged_models:
+                        total_prompts = len({r["prompt_index"] for r in results})
+                        flag_parts = []
+                        for m in sorted(flagged_models):
+                            cnt = sum(
+                                1 for r in results
+                                if r["model_name"] == m and r.get("hallucination_flagged")
+                            )
+                            flag_parts.append(f"{m} flagged on {cnt}/{total_prompts} prompts")
+                        warning_html = (
+                            "<div style='background:#7f1d1d;border-left:4px solid #f87171;"
+                            "padding:10px 14px;border-radius:4px;margin-top:12px'>"
+                            f"<span style='color:#fca5a5'>⚠️ {' | '.join(flag_parts)}</span></div>"
+                        )
+
+                    # When every model is flagged, soften recommendation wording
+                    display_summary = summary
+                    if all_flagged:
+                        display_summary = summary.replace(
+                            "is recommended for your use case",
+                            "performed best in this evaluation",
+                        )
 
                     st.markdown(
                         f"""
 <div style="background:#0d1f17;border:1px solid #10a37f;border-left:6px solid #10a37f;padding:20px;border-radius:8px;margin-bottom:16px">
   <h2 style="color:#10a37f;margin:0">⚖️ Verdict: {winning_model}</h2>
-  <p style="margin:8px 0 0 0;white-space:pre-line;color:#d1fae5;line-height:1.6">{summary}</p>
+  <p style="margin:8px 0 0 0;white-space:pre-line;color:#d1fae5;line-height:1.6">{display_summary}</p>
+  {warning_html}
 </div>
 """,
                         unsafe_allow_html=True,
                     )
-
-                    if warnings:
-                        for w in warnings:
-                            st.warning(f"⚠️ {w}")
                 else:
                     st.info("Verdict not yet generated.")
 
@@ -716,6 +763,21 @@ with tab_results:
                     # Collect unique models and dimensions
                     all_models = sorted({r["model_name"] for r in results})
                     all_dims = ["accuracy", "hallucination", "instruction_following", "conciseness"]
+
+                    # ── Judge transparency line ────────────────────────────────
+                    _judge_model = models_cfg.get("judge", {}).get("default_model", "GPT-5.4")
+                    _tooltip = (
+                        "LLM-as-Judge uses a separate AI model to evaluate each response "
+                        f"against your rubric. {_judge_model} at temperature=0 ensures "
+                        "deterministic, consistent scoring across all prompts."
+                    )
+                    st.markdown(
+                        f'<p style="color:#888;font-size:0.85em;margin:4px 0 12px 0">'
+                        f'🔍 Evaluation judged by <b>{_judge_model}</b> (temperature=0) '
+                        f'using LLM-as-Judge methodology. Judge runs on your OpenAI API key.&nbsp;'
+                        f'<span title="{_tooltip}" style="cursor:help">ℹ️</span></p>',
+                        unsafe_allow_html=True,
+                    )
 
                     # ── 2. Score Breakdown Table ───────────────────────────────
                     st.subheader("📋 Score Breakdown")
@@ -852,6 +914,14 @@ with tab_results:
                         cost_df = pd.DataFrame(cost_rows)
                         st.dataframe(cost_df, use_container_width=True, hide_index=True)
 
+                    # Free-tier note for Gemini models
+                    if any("gemini" in m.lower() for m in all_models):
+                        st.caption(
+                            "* Gemini costs shown are estimated at paid-tier rates. "
+                            "If you are within Google's free tier limits, your actual "
+                            "cost is $0.00."
+                        )
+
                     # "Prices last updated" date from pricing.yaml meta
                     _last_updated = pricing_cfg.get("meta", {}).get("last_updated", "")
                     if _last_updated:
@@ -921,8 +991,9 @@ with tab_results:
                     for idx in sorted_indices:
                         prompt_results = prompts_map[idx]
                         first = prompt_results[0]
-                        prompt_preview = (first.get("prompt_text") or f"Prompt {idx}")[:80]
-                        if len(first.get("prompt_text") or "") > 80:
+                        full_prompt_text = first.get("prompt_text") or f"Prompt {idx}"
+                        prompt_preview = full_prompt_text[:80]
+                        if len(full_prompt_text) > 80:
                             prompt_preview += "..."
 
                         is_high_variance = idx in top_variance_indices
@@ -930,6 +1001,52 @@ with tab_results:
                         label = f"{badge}Prompt {idx}: {prompt_preview}"
 
                         with st.expander(label, expanded=False):
+                            # ── Input section (modality-aware) ─────────────────
+                            if run_modality == "image_text":
+                                _img_loaded_key = f"img_loaded_{run_id}_{idx}"
+                                _img_data_key = f"img_bytes_{run_id}_{idx}"
+
+                                if not st.session_state.get(_img_loaded_key):
+                                    if st.button(
+                                        "🖼️ Show input image",
+                                        key=f"btn_img_{run_id}_{idx}",
+                                    ):
+                                        with st.spinner("Loading image…"):
+                                            try:
+                                                _ir = requests.get(
+                                                    f"{BACKEND_URL}/eval/{run_id}/image/{idx}",
+                                                    timeout=10,
+                                                )
+                                                st.session_state[_img_data_key] = (
+                                                    _ir.content if _ir.status_code == 200 else None
+                                                )
+                                            except requests.exceptions.ConnectionError:
+                                                st.session_state[_img_data_key] = None
+                                            st.session_state[_img_loaded_key] = True
+                                            st.rerun()
+
+                                if st.session_state.get(_img_loaded_key):
+                                    _img_bytes = st.session_state.get(_img_data_key)
+                                    st.caption("Input Image")
+                                    if _img_bytes:
+                                        st.image(_img_bytes, width=400)
+                                    else:
+                                        st.caption("Image not available")
+
+                                st.markdown(f"**Prompt:** {full_prompt_text}")
+
+                            elif run_modality == "structured_data":
+                                st.markdown("**Input Data:**")
+                                import json as _json_mod
+                                try:
+                                    _parsed = _json_mod.loads(full_prompt_text)
+                                    st.code(_json_mod.dumps(_parsed, indent=2), language="json")
+                                except (ValueError, TypeError):
+                                    st.code(full_prompt_text, language="json")
+
+                            else:
+                                st.markdown(f"**Prompt:** {full_prompt_text}")
+
                             if is_high_variance:
                                 insight = _variance_insight(prompt_results)
                                 st.info(
@@ -952,6 +1069,12 @@ with tab_results:
                                     unsafe_allow_html=True,
                                 )
 
+                                if r.get("model_error"):
+                                    st.warning(
+                                        f"⚠️ **{model_name} failed on this prompt** — "
+                                        f"{r['model_error']}"
+                                    )
+
                                 if r.get("hallucination_flagged"):
                                     st.error("⚠️ Hallucination flagged on this prompt.")
 
@@ -959,7 +1082,7 @@ with tab_results:
                                     col_resp, col_scores = st.columns([3, 2])
                                     with col_resp:
                                         st.markdown("**Response:**")
-                                        st.text(r.get("response_text", "")[:500])
+                                        st.text(r.get("response_text", ""))
                                     with col_scores:
                                         st.markdown("**Scores:**")
                                         for d in all_dims:
@@ -971,12 +1094,23 @@ with tab_results:
                                             )
                                         gt_s = r.get("ground_truth_score")
                                         gt_r = r.get("ground_truth_reasoning", "")
+                                        rouge_1 = r.get("rouge_1_score")
+                                        rouge_l = r.get("rouge_l_score")
                                         if gt_s is not None:
                                             st.markdown(
                                                 f"<span style='color:{_score_color(gt_s)}'>"
-                                                f"GT Alignment: {gt_s:.1f}/10</span>",
+                                                f"GT Alignment: {gt_s:.1f}/10 (subjective)</span>",
                                                 unsafe_allow_html=True,
                                             )
+                                            if rouge_1 is not None or rouge_l is not None:
+                                                r1_str = f"{rouge_1:.2f}" if rouge_1 is not None else "N/A"
+                                                rl_str = f"{rouge_l:.2f}" if rouge_l is not None else "N/A"
+                                                st.markdown(
+                                                    f'<span title="ROUGE measures word overlap between model response and expected output. '
+                                                    f'1.0 = perfect match, 0.0 = no overlap">'
+                                                    f"ROUGE-1: {r1_str} | ROUGE-L: {rl_str} (objective) ℹ️</span>",
+                                                    unsafe_allow_html=True,
+                                                )
                                             if gt_r:
                                                 st.caption(gt_r)
                                 st.divider()
