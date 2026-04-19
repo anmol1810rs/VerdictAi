@@ -19,6 +19,7 @@ import csv
 import io
 import json
 import logging
+import re
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -58,6 +59,17 @@ from backend.judge.mock_judge import (
 )
 
 router = APIRouter()
+
+_KEY_PATTERNS = re.compile(
+    r"(sk-[A-Za-z0-9\-_]{10,}|AIza[A-Za-z0-9\-_]{10,}|sk-ant-[A-Za-z0-9\-_]{10,})",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_error(exc: Exception) -> str:
+    """Strip API key patterns from exception messages before storing or returning."""
+    return _KEY_PATTERNS.sub("[REDACTED]", str(exc))[:500]
+
 
 # Constants for validation
 VALID_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -332,7 +344,7 @@ def _execute_eval(run_id: str, request: EvalRunRequest) -> None:
     except Exception as exc:  # noqa: BLE001
         if run and db:
             run.status = "failed"
-            run.error_message = str(exc)[:500]
+            run.error_message = _sanitize_error(exc)
             run.completed_at = datetime.now(timezone.utc)
             db.commit()
     finally:
@@ -562,7 +574,7 @@ async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
                 rouge_1_score=rouge_1,
                 rouge_l_score=rouge_l,
                 evidence_data=r.get("evidence") or {},
-                model_error=r.get("error"),
+                model_error=_KEY_PATTERNS.sub("[REDACTED]", r.get("error") or "")[:500] or None,
             )
             db.add(mr)
         db.commit()
@@ -588,7 +600,7 @@ async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
         logger.exception("[run=%s] Eval failed with unhandled exception: %s", run_id, exc)
         if run and db:
             run.status = "failed"
-            run.error_message = str(exc)[:500]
+            run.error_message = _sanitize_error(exc)
             run.completed_at = datetime.now(timezone.utc)
             db.commit()
     finally:
