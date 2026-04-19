@@ -23,8 +23,32 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create DB tables on startup
-    from backend.db.database import create_tables
+    from backend.db.database import create_tables, SessionLocal
     create_tables()
+
+    # Recovery: any run left in pending/running state from a previous process is
+    # unrecoverable — mark it failed so the UI doesn't show it as forever "running".
+    from datetime import datetime, timezone
+    db = SessionLocal()
+    try:
+        from backend.db.models import EvalRun
+        stuck = (
+            db.query(EvalRun)
+            .filter(EvalRun.status.in_(["pending", "running"]))
+            .all()
+        )
+        for run in stuck:
+            run.status = "failed"
+            run.error_message = "Run interrupted by server restart"
+            run.completed_at = datetime.now(timezone.utc)
+        if stuck:
+            db.commit()
+            logging.getLogger(__name__).warning(
+                "Startup recovery: marked %d stuck run(s) as failed", len(stuck)
+            )
+    finally:
+        db.close()
+
     yield
 
 

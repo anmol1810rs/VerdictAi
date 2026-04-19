@@ -1,9 +1,17 @@
 import os
+import pathlib
 
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./verdictai.db")
+
+# Resolve relative SQLite paths against the project root so the DB is always
+# created in the same place regardless of the process's working directory.
+if DATABASE_URL.startswith("sqlite:///./"):
+    _rel = DATABASE_URL[len("sqlite:///./"):]
+    _project_root = pathlib.Path(__file__).resolve().parent.parent.parent
+    DATABASE_URL = f"sqlite:///{_project_root / _rel}"
 
 engine = create_engine(
     DATABASE_URL,
@@ -33,6 +41,10 @@ def _migrate_add_columns() -> None:
         "ALTER TABLE model_results ADD COLUMN variance_score REAL",
         "ALTER TABLE model_results ADD COLUMN ground_truth_score REAL",
         "ALTER TABLE model_results ADD COLUMN ground_truth_reasoning TEXT",
+        "ALTER TABLE model_results ADD COLUMN rouge_1_score REAL",
+        "ALTER TABLE model_results ADD COLUMN rouge_l_score REAL",
+        "ALTER TABLE model_results ADD COLUMN evidence_data JSON",
+        "ALTER TABLE model_results ADD COLUMN model_error TEXT",
     ]
     with engine.connect() as conn:
         for stmt in stmts:

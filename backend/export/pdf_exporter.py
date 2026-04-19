@@ -20,6 +20,7 @@ from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import (
     HRFlowable,
+    Image as RLImage,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
@@ -267,12 +268,22 @@ def generate_pdf_bytes(run_id: str, db) -> bytes:
     gt_sum: dict = defaultdict(float)
     gt_cnt: dict = defaultdict(int)
     gt_reasoning_by_model: dict = defaultdict(list)
+    rouge1_sum: dict = defaultdict(float)
+    rouge1_cnt: dict = defaultdict(int)
+    rougel_sum: dict = defaultdict(float)
+    rougel_cnt: dict = defaultdict(int)
     for r in results:
         if r.ground_truth_score is not None:
             gt_sum[r.model_name] += float(r.ground_truth_score)
             gt_cnt[r.model_name] += 1
             if r.ground_truth_reasoning:
                 gt_reasoning_by_model[r.model_name].append(r.ground_truth_reasoning)
+        if r.rouge_1_score is not None:
+            rouge1_sum[r.model_name] += float(r.rouge_1_score)
+            rouge1_cnt[r.model_name] += 1
+        if r.rouge_l_score is not None:
+            rougel_sum[r.model_name] += float(r.rouge_l_score)
+            rougel_cnt[r.model_name] += 1
     has_gt = bool(gt_cnt)
 
     # ── Pricing last updated ───────────────────────────────────────────────
@@ -432,6 +443,21 @@ def generate_pdf_bytes(run_id: str, db) -> bytes:
         header_text = f"Prompt {idx}{variance_badge}: {_trunc(prompt_text, 80)}"
         story.append(Paragraph(header_text, S["prompt_header"]))
 
+        # Embed image thumbnail for image_text modality
+        if modality == "image_text" and prompt_rec and prompt_rec.image_data:
+            try:
+                import base64 as _b64
+                _data_uri = prompt_rec.image_data
+                _, _b64_part = _data_uri.split(",", 1)
+                _img_bytes = _b64.b64decode(_b64_part)
+                _img_buf = BytesIO(_img_bytes)
+                _thumb = RLImage(_img_buf, width=150, height=150, kind="proportional")
+                story.append(_thumb)
+                story.append(Paragraph("Input image thumbnail", S["caption"]))
+                story.append(Spacer(1, 4))
+            except Exception:
+                story.append(Paragraph("Input image: (not embeddable)", S["caption"]))
+
         # Build score + reasoning table for this prompt
         # Rows: header, then per-model: [score row, reasoning row]
         pp_data = [pp_header]
@@ -495,18 +521,31 @@ def generate_pdf_bytes(run_id: str, db) -> bytes:
     if has_gt:
         story.append(Spacer(1, 6))
         story.append(Paragraph("GT ALIGNMENT", S["section"]))
+        story.append(Paragraph(
+            "Judge Score: subjective LLM-as-Judge (0–10).  "
+            "ROUGE: objective word-overlap (0.0–1.0, 1.0 = perfect match).",
+            S["caption"],
+        ))
 
-        gt_headers = ["Model", "Avg GT Score", "Sample Reasoning"]
-        gt_col_w   = [130, 100, 300]
+        gt_headers = ["Model", "Judge Score", "ROUGE-1", "ROUGE-L", "Sample Reasoning"]
+        gt_col_w   = [110, 80, 65, 65, 210]   # total = 530, fits in 540 pt usable width
         gt_data    = [gt_headers]
 
         best_gt_model = max(gt_cnt, key=lambda m: gt_sum[m] / gt_cnt[m]) if gt_cnt else None
         for m in models:
             if gt_cnt[m] == 0:
                 continue
-            avg_gt = gt_sum[m] / gt_cnt[m]
+            avg_gt   = gt_sum[m] / gt_cnt[m]
+            avg_r1   = rouge1_sum[m] / rouge1_cnt[m] if rouge1_cnt[m] > 0 else None
+            avg_rl   = rougel_sum[m] / rougel_cnt[m] if rougel_cnt[m] > 0 else None
             sample_r = gt_reasoning_by_model[m][0] if gt_reasoning_by_model[m] else "—"
-            gt_data.append([m, f"{avg_gt:.1f}/10", _trunc(sample_r, 60)])
+            gt_data.append([
+                m,
+                f"{avg_gt:.1f}/10",
+                f"{avg_r1:.2f}" if avg_r1 is not None else "—",
+                f"{avg_rl:.2f}" if avg_rl is not None else "—",
+                _trunc(sample_r, 50),
+            ])
 
         if len(gt_data) > 1:
             gt_table = Table(gt_data, colWidths=gt_col_w, hAlign="LEFT")

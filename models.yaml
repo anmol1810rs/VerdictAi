@@ -380,11 +380,11 @@ api_clients:
     system_prompt_location: "system parameter (separate from messages)"
 
   google:
-    library: "google-generativeai"
-    install: "pip install google-generativeai"
-    async_client: "GenerativeModel"
-    init: "genai.configure(api_key=user_key); model = genai.GenerativeModel(model_name)"
-    call: "model.generate_content_async([prompt, image_part])"
+    library: "google-genai"
+    install: "pip install google-genai"
+    async_client: "genai.Client"
+    init: "client = genai.Client(api_key=user_key)"
+    call: "client.aio.models.generate_content(model=..., contents=[...])"
     image_content_type: "inline_data"
-    image_wrapper: '{"mime_type": "{mime}", "data": b64_bytes}'
+    image_wrapper: "types.Part.from_bytes(data=image_bytes, mime_type=mime)"
     system_prompt_location: "prepend to content list as text part"
