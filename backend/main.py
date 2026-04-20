@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
@@ -57,6 +58,16 @@ app = FastAPI(
     description="Open-source LLM evaluation engine.",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# CORS — allow Streamlit Cloud and local dev
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8501"],
+    allow_origin_regex=r"https://.*\.streamlit\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Register routers

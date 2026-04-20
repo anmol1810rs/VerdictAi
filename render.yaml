@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: verdictai-backend
+    runtime: python
+    region: oregon
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DEV_MODE
+        value: false
+      - key: DATABASE_URL
+        value: sqlite:////var/data/verdictai.db
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    disk:
+      name: verdictai-db
+      mountPath: /var/data
+      sizeGB: 1
