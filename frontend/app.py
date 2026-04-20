@@ -15,7 +15,7 @@ import requests
 import streamlit as st
 import yaml
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = st.secrets.get("BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:8000"))
 
 # ── Page config ────────────────────────────────────────────────────────────
 
@@ -25,6 +25,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Backend wakeup check (Render free tier cold start) ─────────────────────
+
+try:
+    import requests as _r
+    _r.get(f"{BACKEND_URL}/health", timeout=3)
+except Exception:
+    st.warning(
+        "⏳ **Backend is waking up** — this takes ~30 seconds on first load. "
+        "Please wait and then refresh the page."
+    )
 
 # ── Load config from YAMLs ─────────────────────────────────────────────────
 
