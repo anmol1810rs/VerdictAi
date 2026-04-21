@@ -6,6 +6,7 @@ google-genai==1.73.1
 pydantic==2.12.5
 python-dotenv==1.2.2
 SQLAlchemy==2.0.27
+psycopg2-binary==2.9.10
 aiosqlite==0.22.1
 reportlab==4.4.10
 PyYAML==6.0.3

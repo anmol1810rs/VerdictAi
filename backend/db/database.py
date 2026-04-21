@@ -1,22 +1,32 @@
 import os
-import pathlib
 
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.pool import StaticPool
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./verdictai.db")
 
-# Resolve relative SQLite paths against the project root so the DB is always
-# created in the same place regardless of the process's working directory.
-if DATABASE_URL.startswith("sqlite:///./"):
-    _rel = DATABASE_URL[len("sqlite:///./"):]
-    _project_root = pathlib.Path(__file__).resolve().parent.parent.parent
-    DATABASE_URL = f"sqlite:///{_project_root / _rel}"
-
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-)
+if DATABASE_URL == "sqlite:///:memory:":
+    # In-memory SQLite: StaticPool forces all connections to share the same
+    # in-memory DB so tables created at setup are visible during tests.
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+elif DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    engine = create_engine(
+        DATABASE_URL,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=30,
+        pool_recycle=1800,
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -33,26 +43,26 @@ def get_db():
 
 def _migrate_add_columns() -> None:
     """
-    Add columns introduced after the initial table creation.
-    Safe to run on existing DBs — catches the 'duplicate column' error and continues.
+    Idempotent column migrations for schema changes added after initial release.
+    Uses IF NOT EXISTS (supported on PostgreSQL 9.6+ and SQLite 3.37+).
     """
     from sqlalchemy import text
     stmts = [
-        "ALTER TABLE model_results ADD COLUMN variance_score REAL",
-        "ALTER TABLE model_results ADD COLUMN ground_truth_score REAL",
-        "ALTER TABLE model_results ADD COLUMN ground_truth_reasoning TEXT",
-        "ALTER TABLE model_results ADD COLUMN rouge_1_score REAL",
-        "ALTER TABLE model_results ADD COLUMN rouge_l_score REAL",
-        "ALTER TABLE model_results ADD COLUMN evidence_data JSON",
-        "ALTER TABLE model_results ADD COLUMN model_error TEXT",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS variance_score REAL",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS ground_truth_score REAL",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS ground_truth_reasoning TEXT",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS rouge_1_score REAL",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS rouge_l_score REAL",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS evidence_data JSON",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS model_error TEXT",
     ]
     with engine.connect() as conn:
         for stmt in stmts:
             try:
                 conn.execute(text(stmt))
                 conn.commit()
-            except Exception:  # noqa: BLE001 — column already exists
-                pass
+            except Exception:  # noqa: BLE001 — column already exists (fallback for old SQLite)
+                conn.rollback()
 
 
 def create_tables() -> None:

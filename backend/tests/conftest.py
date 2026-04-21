@@ -7,7 +7,7 @@ database.py reads the test DATABASE_URL when the engine is created.
 import os
 
 # Override BEFORE any backend imports
-os.environ["DATABASE_URL"] = "sqlite:///./test_verdictai.db"
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["DEV_MODE"] = "true"
 os.environ["MOCK_LATENCY_MS"] = "0"  # no sleep in tests
 
@@ -25,10 +25,6 @@ def setup_test_db():
     yield
     Base.metadata.drop_all(bind=engine)
     engine.dispose()
-    try:
-        os.remove("./test_verdictai.db")
-    except (FileNotFoundError, PermissionError):
-        pass
 
 
 @pytest.fixture
