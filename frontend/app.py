@@ -15,7 +15,10 @@ import requests
 import streamlit as st
 import yaml
 
-BACKEND_URL = st.secrets.get("BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:8000"))
+try:
+    BACKEND_URL = st.secrets.get("BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:8000"))
+except Exception:
+    BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 # ── Page config ────────────────────────────────────────────────────────────
 
