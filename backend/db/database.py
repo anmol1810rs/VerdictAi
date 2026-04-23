@@ -55,6 +55,15 @@ def _migrate_add_columns() -> None:
         "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS rouge_l_score REAL",
         "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS evidence_data JSON",
         "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS model_error TEXT",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS eval_api_calls INTEGER DEFAULT 0",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS judge_api_calls INTEGER DEFAULT 0",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS gt_api_calls INTEGER DEFAULT 0",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS judge_tokens_in INTEGER",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS judge_tokens_out INTEGER",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS judge_cost_usd REAL",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS gt_tokens_in INTEGER",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS gt_tokens_out INTEGER",
+        "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS gt_cost_usd REAL",
     ]
     with engine.connect() as conn:
         for stmt in stmts:

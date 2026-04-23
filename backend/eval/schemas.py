@@ -125,6 +125,15 @@ class ModelResultOut(BaseModel):
     rouge_1_score: Optional[float] = None          # ROUGE-1 F1 word overlap; null if no GT
     rouge_l_score: Optional[float] = None          # ROUGE-L F1 LCS-based; null if no GT
     model_error: Optional[str] = None  # runner error if API call failed
+    eval_api_calls: Optional[int] = None
+    judge_api_calls: Optional[int] = None
+    gt_api_calls: Optional[int] = None
+    judge_tokens_in: Optional[int] = None
+    judge_tokens_out: Optional[int] = None
+    judge_cost_usd: Optional[float] = None
+    gt_tokens_in: Optional[int] = None
+    gt_tokens_out: Optional[int] = None
+    gt_cost_usd: Optional[float] = None
 
 
 class EvalRunResponse(BaseModel):

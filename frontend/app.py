@@ -882,14 +882,24 @@ with tab_results:
                     # ── 3. Cost Breakdown ──────────────────────────────────────
                     st.subheader("💰 Cost Breakdown")
 
-                    cost_by_model: dict = defaultdict(float)
+                    # Aggregate per-model cost + token + call data
+                    eval_cost_by_model: dict = defaultdict(float)
+                    judge_cost_by_model: dict = defaultdict(float)
+                    gt_cost_by_model: dict = defaultdict(float)
+                    eval_calls_by_model: dict = defaultdict(int)
+                    judge_calls_by_model: dict = defaultdict(int)
+                    gt_calls_by_model: dict = defaultdict(int)
                     tokens_in_by_model: dict = defaultdict(int)
                     tokens_out_by_model: dict = defaultdict(int)
-                    prompt_count_by_model: dict = defaultdict(int)
+
                     for r in results:
                         m = r["model_name"]
-                        cost_by_model[m] += r.get("cost_usd", 0.0)
-                        # Prefer direct columns; fall back to tokens_used dict
+                        eval_cost_by_model[m] += r.get("cost_usd", 0.0)
+                        judge_cost_by_model[m] += r.get("judge_cost_usd") or 0.0
+                        gt_cost_by_model[m] += r.get("gt_cost_usd") or 0.0
+                        eval_calls_by_model[m] += r.get("eval_api_calls") or 0
+                        judge_calls_by_model[m] += r.get("judge_api_calls") or 0
+                        gt_calls_by_model[m] += r.get("gt_api_calls") or 0
                         tin_r = r.get("tokens_in")
                         tout_r = r.get("tokens_out")
                         if tin_r is None:
@@ -898,35 +908,97 @@ with tab_results:
                             tout_r = tu.get("output", 0)
                         tokens_in_by_model[m] += tin_r or 0
                         tokens_out_by_model[m] += tout_r or 0
-                        prompt_count_by_model[m] += 1
+
+                    total_judge_calls = sum(judge_calls_by_model.values())
+                    total_gt_calls = sum(gt_calls_by_model.values())
+                    total_judge_cost = sum(judge_cost_by_model.values())
+                    total_gt_cost = sum(gt_cost_by_model.values())
+                    total_eval_cost = sum(eval_cost_by_model.values())
+                    total_eval_calls = sum(eval_calls_by_model.values())
+                    grand_total_calls = total_eval_calls + total_judge_calls + total_gt_calls
+                    grand_total_cost = total_eval_cost + total_judge_cost + total_gt_cost
+                    has_gt_calls = total_gt_calls > 0
 
                     cost_rows = []
                     for m in all_models:
-                        total_cost = cost_by_model[m]
-                        tin = tokens_in_by_model[m]
-                        tout = tokens_out_by_model[m]
-                        total_tokens = tin + tout
-                        cost_per_1k = (total_cost / total_tokens * 1000) if total_tokens > 0 else 0.0
-                        quality_score = (
-                            dim_sum[m]["accuracy"] / dim_cnt[m]["accuracy"]
-                            if dim_cnt[m]["accuracy"] > 0 else 1.0
+                        ec = eval_cost_by_model[m]
+                        jc = judge_cost_by_model[m]
+                        gc = gt_cost_by_model[m]
+                        total_model_calls = (
+                            eval_calls_by_model[m]
+                            + judge_calls_by_model[m]
+                            + gt_calls_by_model[m]
                         )
-                        cpp = total_cost / quality_score if quality_score > 0 else 0.0
-                        cost_rows.append(
-                            {
-                                "Model": m,
-                                "Total Cost (USD)": f"${total_cost:.6f}",
-                                "Tokens In": f"{tin:,}",
-                                "Tokens Out": f"{tout:,}",
-                                "Cost / 1K tokens": f"${cost_per_1k:.6f}",
-                                "Cost / Quality Pt": f"${cpp:.6f}",
-                            }
-                        )
+                        row: dict = {
+                            "Model": m,
+                            "Calls": total_model_calls,
+                            "Eval Cost": f"${ec:.6f}",
+                            "Judge Cost": f"${jc:.6f}",
+                            "Total": f"${ec + jc + gc:.6f}",
+                        }
+                        if has_gt_calls:
+                            row["GT Cost"] = f"${gc:.6f}"
+                        cost_rows.append(row)
+
+                    # Judge totals row
+                    judge_row: dict = {
+                        "Model": "Judge (all models)",
+                        "Calls": total_judge_calls,
+                        "Eval Cost": "—",
+                        "Judge Cost": f"${total_judge_cost:.6f}",
+                        "Total": f"${total_judge_cost:.6f}",
+                    }
+                    if has_gt_calls:
+                        judge_row["GT Cost"] = "—"
+                    cost_rows.append(judge_row)
+
+                    # GT totals row (only if any GT calls happened)
+                    if has_gt_calls:
+                        cost_rows.append({
+                            "Model": "GT scoring (all models)",
+                            "Calls": total_gt_calls,
+                            "Eval Cost": "—",
+                            "Judge Cost": "—",
+                            "GT Cost": f"${total_gt_cost:.6f}",
+                            "Total": f"${total_gt_cost:.6f}",
+                        })
+
+                    # Grand total row
+                    total_row: dict = {
+                        "Model": "TOTAL",
+                        "Calls": grand_total_calls,
+                        "Eval Cost": f"${total_eval_cost:.6f}",
+                        "Judge Cost": f"${total_judge_cost:.6f}",
+                        "Total": f"${grand_total_cost:.6f}",
+                    }
+                    if has_gt_calls:
+                        total_row["GT Cost"] = f"${total_gt_cost:.6f}"
+                    cost_rows.append(total_row)
 
                     if cost_rows:
                         import pandas as pd
-                        cost_df = pd.DataFrame(cost_rows)
+                        # Reorder columns: Model, Calls, Eval Cost, Judge Cost, [GT Cost], Total
+                        col_order = ["Model", "Calls", "Eval Cost", "Judge Cost"]
+                        if has_gt_calls:
+                            col_order.append("GT Cost")
+                        col_order.append("Total")
+                        cost_df = pd.DataFrame(cost_rows)[col_order]
                         st.dataframe(cost_df, use_container_width=True, hide_index=True)
+
+                    # API calls transparency callout
+                    st.info(
+                        f"**Why does my OpenAI dashboard show more spend than this?**\n\n"
+                        f"VerdictAI makes **{grand_total_calls} API calls** per run — not just the "
+                        f"model calls you're evaluating:\n\n"
+                        f"1. **Eval calls** ({total_eval_calls:,}) — models answering your prompts\n"
+                        f"2. **Judge calls** ({total_judge_calls:,}) — GPT-5.4 scoring each response\n"
+                        + (
+                            f"3. **GT calls** ({total_gt_calls:,}) — scoring against your expected outputs\n"
+                            if has_gt_calls else ""
+                        )
+                        + f"\nAll three use your OpenAI API key. "
+                        f"This is the full picture of what VerdictAI does with your key."
+                    )
 
                     # Free-tier note for Gemini models
                     if any("gemini" in m.lower() for m in all_models):
