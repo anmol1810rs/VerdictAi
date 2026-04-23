@@ -64,6 +64,16 @@ class ModelResult(Base):
     rouge_l_score = Column(Float, nullable=True)          # ROUGE-L F1 longest-common-subsequence (null if no GT)
     evidence_data = Column(JSON, nullable=True)           # judge evidence per dimension: {dim: "quoted text"}
     model_error = Column(Text, nullable=True)             # runner error message if API call failed
+    # ── API call tracking (Session 8 transparency) ─────────────────────────
+    eval_api_calls = Column(Integer, nullable=True, default=0)    # 1 per successful model call
+    judge_api_calls = Column(Integer, nullable=True, default=0)   # 1 normally, 2 on retry
+    gt_api_calls = Column(Integer, nullable=True, default=0)      # 1 if GT scored, 0 otherwise
+    judge_tokens_in = Column(Integer, nullable=True)
+    judge_tokens_out = Column(Integer, nullable=True)
+    judge_cost_usd = Column(Float, nullable=True)
+    gt_tokens_in = Column(Integer, nullable=True)
+    gt_tokens_out = Column(Integer, nullable=True)
+    gt_cost_usd = Column(Float, nullable=True)
 
 
 class Verdict(Base):

@@ -34,6 +34,16 @@ JUDGE_API_MODEL_STRING = PRICING_CONFIG["models"][JUDGE_MODEL_ID]["api_model_str
 _mock_scores: dict = {k: DEV_MOCK["mock_scores"][k] for k in JUDGE_DIMENSIONS}
 _mock_reasoning: dict = {k: str(v).strip() for k, v in DEV_MOCK["mock_reasoning"].items() if k in JUDGE_DIMENSIONS}
 
+# ── Cost calculation ───────────────────────────────────────────────────────
+
+
+def _calc_judge_cost(tokens_in: int, tokens_out: int) -> float:
+    """Calculate judge API cost in USD from pricing.yaml rates."""
+    pricing = PRICING_CONFIG.get("models", {}).get(JUDGE_MODEL_ID, {})
+    input_rate = pricing.get("input_per_1m_usd", 0.0)
+    output_rate = pricing.get("output_per_1m_usd", 0.0)
+    return round((tokens_in * input_rate + tokens_out * output_rate) / 1_000_000, 8)
+
 # ── Prompt construction ────────────────────────────────────────────────────
 
 JUDGE_SYSTEM_PROMPT = """You are an impartial AI evaluation judge.
@@ -176,8 +186,9 @@ async def _call_judge_api(
     user_prompt: str,
     api_key: str,
     system_prompt: str = JUDGE_SYSTEM_PROMPT,
-) -> str:
-    """Make a single call to the judge model via Responses API. Returns raw response text."""
+) -> tuple[str, int, int]:
+    """Make a single call to the judge model via Responses API.
+    Returns (response_text, tokens_in, tokens_out)."""
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=api_key)
@@ -188,7 +199,10 @@ async def _call_judge_api(
         temperature=0,
         max_output_tokens=1000,
     )
-    return response.output[0].content[0].text
+    text = response.output[0].content[0].text
+    tokens_in = response.usage.input_tokens
+    tokens_out = response.usage.output_tokens
+    return text, tokens_in, tokens_out
 
 
 # ── Score single response ──────────────────────────────────────────────────
@@ -211,21 +225,35 @@ async def score_response_async(
             await asyncio.sleep(MOCK_LATENCY_MS / 1000 * 0.3)  # judge is faster than model
         hallucination_score = _mock_scores.get("hallucination", 8.5)
         hallucination_flagged = hallucination_score <= HALLUCINATION_FLAG_THRESHOLD
+        mock_tin, mock_tout = 500, 250
         return {
             "scores": dict(_mock_scores),
             "reasoning": dict(_mock_reasoning),
             "evidence": {dim: f"[MOCK] Evidence for {dim}." for dim in JUDGE_DIMENSIONS},
             "hallucination_flagged": hallucination_flagged,
             "hallucination_reason": _mock_reasoning.get("hallucination") if hallucination_flagged else None,
+            "judge_tokens_in": mock_tin,
+            "judge_tokens_out": mock_tout,
+            "judge_cost_usd": _calc_judge_cost(mock_tin, mock_tout),
+            "judge_api_calls": 1,
         }
 
     user_prompt = build_judge_user_prompt(prompt_text, response_text, rubric_config, expected_output)
 
+    total_tin, total_tout, total_calls = 0, 0, 0
+
     # Attempt 1
     try:
-        raw = await _call_judge_api(user_prompt, api_key)
+        raw, tin, tout = await _call_judge_api(user_prompt, api_key)
+        total_tin += tin
+        total_tout += tout
+        total_calls += 1
         result = parse_judge_response(raw)
         if result is not None:
+            result["judge_tokens_in"] = total_tin
+            result["judge_tokens_out"] = total_tout
+            result["judge_cost_usd"] = _calc_judge_cost(total_tin, total_tout)
+            result["judge_api_calls"] = total_calls
             return result
     except Exception as exc:
         logger.warning("Judge attempt 1 failed: %s", exc)
@@ -233,9 +261,16 @@ async def score_response_async(
     # Retry with explicit JSON instruction
     retry_prompt = user_prompt + "\n\nReturn ONLY valid JSON, no other text."
     try:
-        raw = await _call_judge_api(retry_prompt, api_key)
+        raw, tin, tout = await _call_judge_api(retry_prompt, api_key)
+        total_tin += tin
+        total_tout += tout
+        total_calls += 1
         result = parse_judge_response(raw)
         if result is not None:
+            result["judge_tokens_in"] = total_tin
+            result["judge_tokens_out"] = total_tout
+            result["judge_cost_usd"] = _calc_judge_cost(total_tin, total_tout)
+            result["judge_api_calls"] = total_calls
             return result
     except Exception as exc:
         logger.warning("Judge retry failed: %s", exc)
@@ -250,6 +285,10 @@ async def score_response_async(
         "hallucination_flagged": False,
         "hallucination_reason": None,
         "judge_error": True,
+        "judge_tokens_in": total_tin,
+        "judge_tokens_out": total_tout,
+        "judge_cost_usd": _calc_judge_cost(total_tin, total_tout),
+        "judge_api_calls": total_calls,
     }
 
 
@@ -287,18 +326,36 @@ async def score_responses_parallel(
     judge_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     enriched = [dict(r) for r in model_results]
+
+    # Fill zero judge stats for results skipped due to error
+    for i, r in enumerate(enriched):
+        if r.get("error"):
+            enriched[i].update({
+                "scores": {dim: None for dim in JUDGE_DIMENSIONS},
+                "reasoning": {dim: "" for dim in JUDGE_DIMENSIONS},
+                "evidence": {dim: "" for dim in JUDGE_DIMENSIONS},
+                "hallucination_flagged": False,
+                "hallucination_reason": None,
+                "judge_tokens_in": 0,
+                "judge_tokens_out": 0,
+                "judge_cost_usd": 0.0,
+                "judge_api_calls": 0,
+            })
+
     for idx, judge_out in zip(indices, judge_results):
         if isinstance(judge_out, Exception):
             logger.error("Judge gather error for result %d: %s", idx, judge_out)
-            enriched[idx].update(
-                {
-                    "scores": {dim: None for dim in JUDGE_DIMENSIONS},
-                    "reasoning": {dim: "" for dim in JUDGE_DIMENSIONS},
-                    "evidence": {dim: "" for dim in JUDGE_DIMENSIONS},
-                    "hallucination_flagged": False,
-                    "hallucination_reason": None,
-                }
-            )
+            enriched[idx].update({
+                "scores": {dim: None for dim in JUDGE_DIMENSIONS},
+                "reasoning": {dim: "" for dim in JUDGE_DIMENSIONS},
+                "evidence": {dim: "" for dim in JUDGE_DIMENSIONS},
+                "hallucination_flagged": False,
+                "hallucination_reason": None,
+                "judge_tokens_in": 0,
+                "judge_tokens_out": 0,
+                "judge_cost_usd": 0.0,
+                "judge_api_calls": 0,
+            })
         else:
             enriched[idx].update(judge_out)
 
@@ -333,23 +390,42 @@ async def score_ground_truth_async(
     Returns {"ground_truth_score": float, "ground_truth_reasoning": str}.
     """
     if DEV_MODE:
+        mock_tin, mock_tout = 200, 50
         return {
             "ground_truth_score": 7.5,
             "ground_truth_reasoning": (
                 "Response aligns with the expected output in substance and key facts."
             ),
+            "gt_tokens_in": mock_tin,
+            "gt_tokens_out": mock_tout,
+            "gt_cost_usd": _calc_judge_cost(mock_tin, mock_tout),
+            "gt_api_calls": 1,
         }
 
     user_prompt = _build_gt_user_prompt(expected_output, response_text)
     try:
-        raw = await _call_judge_api(user_prompt, api_key, system_prompt=_GT_SYSTEM_PROMPT)
+        raw, tin, tout = await _call_judge_api(user_prompt, api_key, system_prompt=_GT_SYSTEM_PROMPT)
         data = json.loads(raw.strip().lstrip("```json").rstrip("```").strip())
         score = min(10.0, max(0.0, float(data["alignment_score"])))
         reasoning = str(data.get("alignment_reasoning", "")).strip()
-        return {"ground_truth_score": score, "ground_truth_reasoning": reasoning}
+        return {
+            "ground_truth_score": score,
+            "ground_truth_reasoning": reasoning,
+            "gt_tokens_in": tin,
+            "gt_tokens_out": tout,
+            "gt_cost_usd": _calc_judge_cost(tin, tout),
+            "gt_api_calls": 1,
+        }
     except Exception as exc:
         logger.warning("GT scoring failed: %s", exc)
-        return {"ground_truth_score": None, "ground_truth_reasoning": None}
+        return {
+            "ground_truth_score": None,
+            "ground_truth_reasoning": None,
+            "gt_tokens_in": 0,
+            "gt_tokens_out": 0,
+            "gt_cost_usd": 0.0,
+            "gt_api_calls": 0,
+        }
 
 
 async def score_ground_truth_parallel(
@@ -377,6 +453,10 @@ async def score_ground_truth_parallel(
         for r in enriched:
             r.setdefault("ground_truth_score", None)
             r.setdefault("ground_truth_reasoning", None)
+            r.setdefault("gt_tokens_in", 0)
+            r.setdefault("gt_tokens_out", 0)
+            r.setdefault("gt_cost_usd", 0.0)
+            r.setdefault("gt_api_calls", 0)
         return enriched
 
     gt_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -386,13 +466,21 @@ async def score_ground_truth_parallel(
             logger.error("GT gather error for result %d: %s", idx, gt_out)
             enriched[idx]["ground_truth_score"] = None
             enriched[idx]["ground_truth_reasoning"] = None
+            enriched[idx]["gt_tokens_in"] = 0
+            enriched[idx]["gt_tokens_out"] = 0
+            enriched[idx]["gt_cost_usd"] = 0.0
+            enriched[idx]["gt_api_calls"] = 0
         else:
             enriched[idx].update(gt_out)
 
-    # Fill in None for results that had no expected_output
+    # Fill in zeros for results that had no expected_output
     for r in enriched:
         r.setdefault("ground_truth_score", None)
         r.setdefault("ground_truth_reasoning", None)
+        r.setdefault("gt_tokens_in", 0)
+        r.setdefault("gt_tokens_out", 0)
+        r.setdefault("gt_cost_usd", 0.0)
+        r.setdefault("gt_api_calls", 0)
 
     return enriched
 

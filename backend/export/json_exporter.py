@@ -66,17 +66,27 @@ def generate_json_report(run_id: str, db) -> dict:
     rubric_config = run.rubric_config or {}
 
     # ── Aggregate per-model stats ──────────────────────────────────────────
-    cost_by_model: dict = defaultdict(float)
-    tin_by_model:  dict = defaultdict(int)
-    tout_by_model: dict = defaultdict(int)
-    dim_sum:       dict = defaultdict(lambda: defaultdict(float))
-    dim_cnt:       dict = defaultdict(lambda: defaultdict(int))
+    cost_by_model:        dict = defaultdict(float)
+    judge_cost_by_model:  dict = defaultdict(float)
+    gt_cost_by_model:     dict = defaultdict(float)
+    tin_by_model:         dict = defaultdict(int)
+    tout_by_model:        dict = defaultdict(int)
+    eval_calls_by_model:  dict = defaultdict(int)
+    judge_calls_by_model: dict = defaultdict(int)
+    gt_calls_by_model:    dict = defaultdict(int)
+    dim_sum:              dict = defaultdict(lambda: defaultdict(float))
+    dim_cnt:              dict = defaultdict(lambda: defaultdict(int))
 
     for r in results:
         m = r.model_name
-        cost_by_model[m] += r.cost_usd or 0.0
-        tin_by_model[m]  += r.tokens_in or 0
-        tout_by_model[m] += r.tokens_out or 0
+        cost_by_model[m]        += r.cost_usd or 0.0
+        judge_cost_by_model[m]  += r.judge_cost_usd or 0.0
+        gt_cost_by_model[m]     += r.gt_cost_usd or 0.0
+        tin_by_model[m]         += r.tokens_in or 0
+        tout_by_model[m]        += r.tokens_out or 0
+        eval_calls_by_model[m]  += r.eval_api_calls or 0
+        judge_calls_by_model[m] += r.judge_api_calls or 0
+        gt_calls_by_model[m]    += r.gt_api_calls or 0
         for d in DIMS:
             v = (r.dimension_scores or {}).get(d)
             if v is not None:
@@ -133,14 +143,26 @@ def generate_json_report(run_id: str, db) -> dict:
         avg_scores["cost_efficiency"] = round(float(ce_score), 4) if ce_score is not None else None
         avg_scores["total"]           = round(float(final), 4) if final is not None else None
 
+        j_cost = judge_cost_by_model[m]
+        g_cost = gt_cost_by_model[m]
+
         models_section[m] = {
             "avg_scores": avg_scores,
             "cost": {
-                "total_usd":              round(total_c, 6),
+                "eval_cost_usd":          round(total_c, 6),
+                "judge_cost_usd":         round(j_cost, 6),
+                "gt_cost_usd":            round(g_cost, 6),
+                "total_usd":              round(total_c + j_cost + g_cost, 6),
                 "tokens_in":              tin,
                 "tokens_out":             tout,
                 "cost_per_1k_tokens":     cost_1k,
                 "cost_per_quality_point": cpp,
+            },
+            "api_calls": {
+                "eval_calls":  eval_calls_by_model[m],
+                "judge_calls": judge_calls_by_model[m],
+                "gt_calls":    gt_calls_by_model[m],
+                "total_calls": eval_calls_by_model[m] + judge_calls_by_model[m] + gt_calls_by_model[m],
             },
         }
 
@@ -181,6 +203,15 @@ def generate_json_report(run_id: str, db) -> dict:
                 "tokens_in":             r.tokens_in,
                 "tokens_out":            r.tokens_out,
                 "cost_usd":              r.cost_usd,
+                "judge_tokens_in":       r.judge_tokens_in,
+                "judge_tokens_out":      r.judge_tokens_out,
+                "judge_cost_usd":        r.judge_cost_usd,
+                "gt_tokens_in":          r.gt_tokens_in,
+                "gt_tokens_out":         r.gt_tokens_out,
+                "gt_cost_usd":           r.gt_cost_usd,
+                "eval_api_calls":        r.eval_api_calls,
+                "judge_api_calls":       r.judge_api_calls,
+                "gt_api_calls":          r.gt_api_calls,
             }
 
         prompts_section.append({
@@ -196,10 +227,24 @@ def generate_json_report(run_id: str, db) -> dict:
     # Sort by prompt index for deterministic order
     prompts_section.sort(key=lambda x: x["index"])
 
+    # ── API calls summary ──────────────────────────────────────────────────
+    total_eval_calls_all  = sum(eval_calls_by_model.values())
+    total_judge_calls_all = sum(judge_calls_by_model.values())
+    total_gt_calls_all    = sum(gt_calls_by_model.values())
+
     # ── Assemble final schema ──────────────────────────────────────────────
     return {
         "verdictai_version": VERDICTAI_VERSION,
         "exported_at":       _iso(datetime.now(timezone.utc)),
+        "api_calls_summary": {
+            "eval_calls":  total_eval_calls_all,
+            "judge_calls": total_judge_calls_all,
+            "gt_calls":    total_gt_calls_all,
+            "total_calls": total_eval_calls_all + total_judge_calls_all + total_gt_calls_all,
+            "total_eval_cost_usd":  round(sum(cost_by_model.values()), 6),
+            "total_judge_cost_usd": round(sum(judge_cost_by_model.values()), 6),
+            "total_gt_cost_usd":    round(sum(gt_cost_by_model.values()), 6),
+        },
         "run": {
             "id":               run.id,
             "label":            run.custom_label,

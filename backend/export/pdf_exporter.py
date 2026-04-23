@@ -232,18 +232,28 @@ def generate_pdf_bytes(run_id: str, db) -> bytes:
     summary_text  = (verdict_row.summary or "") if verdict_row else ""
 
     # ── Aggregate cost & token data from ModelResult ───────────────────────
-    cost_by_model: dict    = defaultdict(float)
-    tin_by_model: dict     = defaultdict(int)
-    tout_by_model: dict    = defaultdict(int)
+    cost_by_model:        dict = defaultdict(float)
+    judge_cost_by_model:  dict = defaultdict(float)
+    gt_cost_by_model:     dict = defaultdict(float)
+    tin_by_model:         dict = defaultdict(int)
+    tout_by_model:        dict = defaultdict(int)
+    eval_calls_by_model:  dict = defaultdict(int)
+    judge_calls_by_model: dict = defaultdict(int)
+    gt_calls_by_model:    dict = defaultdict(int)
     dim_sum: dict          = defaultdict(lambda: defaultdict(float))
     dim_cnt: dict          = defaultdict(lambda: defaultdict(int))
     DIMS = ["accuracy", "hallucination", "instruction_following", "conciseness"]
 
     for r in results:
         m = r.model_name
-        cost_by_model[m] += r.cost_usd or 0.0
-        tin_by_model[m]  += r.tokens_in or 0
-        tout_by_model[m] += r.tokens_out or 0
+        cost_by_model[m]        += r.cost_usd or 0.0
+        judge_cost_by_model[m]  += r.judge_cost_usd or 0.0
+        gt_cost_by_model[m]     += r.gt_cost_usd or 0.0
+        tin_by_model[m]         += r.tokens_in or 0
+        tout_by_model[m]        += r.tokens_out or 0
+        eval_calls_by_model[m]  += r.eval_api_calls or 0
+        judge_calls_by_model[m] += r.judge_api_calls or 0
+        gt_calls_by_model[m]    += r.gt_api_calls or 0
         for d in DIMS:
             v = (r.dimension_scores or {}).get(d)
             if v is not None:
@@ -383,32 +393,75 @@ def generate_pdf_bytes(run_id: str, db) -> bytes:
     # ── Cost Breakdown Table ────────────────────────────────────────────────
     story.append(Paragraph("COST BREAKDOWN", S["section"]))
 
-    cost_headers = ["Model", "Total $", "Tokens In", "Tokens Out", "$/1K tokens", "$/Quality Pt"]
-    cost_col_w   = [120, 70, 75, 80, 85, 90]   # = 520
+    total_judge_calls = sum(judge_calls_by_model.values())
+    total_gt_calls    = sum(gt_calls_by_model.values())
+    total_eval_calls  = sum(eval_calls_by_model.values())
+    total_judge_cost  = sum(judge_cost_by_model.values())
+    total_gt_cost     = sum(gt_cost_by_model.values())
+    total_eval_cost   = sum(cost_by_model.values())
+    grand_calls       = total_eval_calls + total_judge_calls + total_gt_calls
+    grand_cost        = total_eval_cost + total_judge_cost + total_gt_cost
+    has_gt_calls      = total_gt_calls > 0
+
+    if has_gt_calls:
+        cost_headers = ["Model", "Calls", "Eval $", "Judge $", "GT $", "Total $"]
+        cost_col_w   = [115, 50, 75, 75, 75, 75]   # = 465
+    else:
+        cost_headers = ["Model", "Calls", "Eval $", "Judge $", "Total $"]
+        cost_col_w   = [140, 55, 90, 90, 90]        # = 465
 
     cost_data = [cost_headers]
     for m in models:
-        total_c = cost_by_model[m]
-        tin     = tin_by_model[m]
-        tout    = tout_by_model[m]
-        total_t = tin + tout
-        cost_1k = (total_c / total_t * 1000) if total_t > 0 else 0.0
-        # quality from score_breakdown final_score
-        q_score = score_bd.get(m, {}).get("final_score") or 1.0
-        cpp     = total_c / q_score if q_score > 0 else 0.0
+        ec    = cost_by_model[m]
+        jc    = judge_cost_by_model[m]
+        gc    = gt_cost_by_model[m]
+        calls = eval_calls_by_model[m] + judge_calls_by_model[m] + gt_calls_by_model[m]
+        row   = [m, _fmt_int(calls), _fmt_cost(ec), _fmt_cost(jc)]
+        if has_gt_calls:
+            row.append(_fmt_cost(gc))
+        row.append(_fmt_cost(ec + jc + gc))
+        cost_data.append(row)
+
+    # Judge totals row
+    j_row = ["Judge (all)", _fmt_int(total_judge_calls), "—", _fmt_cost(total_judge_cost)]
+    if has_gt_calls:
+        j_row.append("—")
+    j_row.append(_fmt_cost(total_judge_cost))
+    cost_data.append(j_row)
+
+    # GT totals row
+    if has_gt_calls:
         cost_data.append([
-            m,
-            _fmt_cost(total_c),
-            _fmt_int(tin),
-            _fmt_int(tout),
-            _fmt_cost(cost_1k),
-            _fmt_cost(cpp),
+            "GT (all)", _fmt_int(total_gt_calls), "—", "—",
+            _fmt_cost(total_gt_cost), _fmt_cost(total_gt_cost),
         ])
 
+    # Grand total row
+    tot_row = ["TOTAL", _fmt_int(grand_calls), _fmt_cost(total_eval_cost), _fmt_cost(total_judge_cost)]
+    if has_gt_calls:
+        tot_row.append(_fmt_cost(total_gt_cost))
+    tot_row.append(_fmt_cost(grand_cost))
+    cost_data.append(tot_row)
+
+    n_data_rows = len(cost_data) - 1
     ct = Table(cost_data, colWidths=cost_col_w, hAlign="LEFT")
-    ct.setStyle(TableStyle(_base_table_style(len(models))))
+    ct.setStyle(TableStyle(_base_table_style(n_data_rows)))
     story.append(ct)
     story.append(Paragraph(f"Prices last updated: {pricing_last_updated}", S["caption"]))
+
+    # API calls transparency note
+    gt_line = (
+        f"  (3) GT calls — scoring against expected outputs  ({total_gt_calls:,} calls)"
+        if has_gt_calls else ""
+    )
+    story.append(Paragraph(
+        f"VerdictAI made {grand_calls:,} total API calls this run: "
+        f"(1) Eval calls — models answering prompts ({total_eval_calls:,}), "
+        f"(2) Judge calls — GPT-5.4 scoring each response ({total_judge_calls:,})"
+        + (f", (3) GT calls ({total_gt_calls:,})" if has_gt_calls else "")
+        + ". All use your OpenAI API key.",
+        S["caption"],
+    ))
 
     callout = cost_comp.get("callout", "")
     if callout:

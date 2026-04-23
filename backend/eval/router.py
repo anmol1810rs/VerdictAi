@@ -396,6 +396,12 @@ def _run_mock_eval(
                 else (None, None)
             )
 
+            # Mock judge token counts (representative of real judge call sizes)
+            mock_judge_tin, mock_judge_tout = 500, 250
+            mock_gt_tin, mock_gt_tout = 200, 50
+            from backend.judge.judge import _calc_judge_cost
+            mock_gt_calls = 1 if prompt_rec.expected_output else 0
+
             result = ModelResult(
                 id=str(uuid.uuid4()),
                 eval_run_id=run_id,
@@ -416,6 +422,15 @@ def _run_mock_eval(
                 rouge_1_score=rouge_1,
                 rouge_l_score=rouge_l,
                 evidence_data={k: "[MOCK]" for k in dim_scores},
+                eval_api_calls=1,
+                judge_api_calls=1,
+                gt_api_calls=mock_gt_calls,
+                judge_tokens_in=mock_judge_tin,
+                judge_tokens_out=mock_judge_tout,
+                judge_cost_usd=_calc_judge_cost(mock_judge_tin, mock_judge_tout),
+                gt_tokens_in=mock_gt_tin if mock_gt_calls else 0,
+                gt_tokens_out=mock_gt_tout if mock_gt_calls else 0,
+                gt_cost_usd=_calc_judge_cost(mock_gt_tin, mock_gt_tout) if mock_gt_calls else 0.0,
             )
             db.add(result)
 
@@ -575,6 +590,15 @@ async def _run_real_eval_async(run_id: str, request: EvalRunRequest) -> None:
                 rouge_l_score=rouge_l,
                 evidence_data=r.get("evidence") or {},
                 model_error=_KEY_PATTERNS.sub("[REDACTED]", r.get("error") or "")[:500] or None,
+                eval_api_calls=0 if r.get("error") else 1,
+                judge_api_calls=r.get("judge_api_calls", 0),
+                gt_api_calls=r.get("gt_api_calls", 0),
+                judge_tokens_in=r.get("judge_tokens_in", 0),
+                judge_tokens_out=r.get("judge_tokens_out", 0),
+                judge_cost_usd=r.get("judge_cost_usd", 0.0),
+                gt_tokens_in=r.get("gt_tokens_in", 0),
+                gt_tokens_out=r.get("gt_tokens_out", 0),
+                gt_cost_usd=r.get("gt_cost_usd", 0.0),
             )
             db.add(mr)
         db.commit()
@@ -1229,6 +1253,15 @@ def get_eval_results(run_id: str, db: Session = Depends(get_db)):
             rouge_1_score=r.rouge_1_score,
             rouge_l_score=r.rouge_l_score,
             model_error=r.model_error,
+            eval_api_calls=r.eval_api_calls,
+            judge_api_calls=r.judge_api_calls,
+            gt_api_calls=r.gt_api_calls,
+            judge_tokens_in=r.judge_tokens_in,
+            judge_tokens_out=r.judge_tokens_out,
+            judge_cost_usd=r.judge_cost_usd,
+            gt_tokens_in=r.gt_tokens_in,
+            gt_tokens_out=r.gt_tokens_out,
+            gt_cost_usd=r.gt_cost_usd,
         )
         for r in db_results
     ]

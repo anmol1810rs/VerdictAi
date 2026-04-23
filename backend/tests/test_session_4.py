@@ -440,11 +440,11 @@ class TestJudgeScoring:
   "cost_efficiency": "auto"
 }"""
 
-        async def mock_call_judge(user_prompt, api_key):
+        async def mock_call_judge(user_prompt, api_key, system_prompt=None):
             call_count["n"] += 1
             if call_count["n"] == 1:
-                return "INVALID JSON {{{"
-            return valid_response
+                return "INVALID JSON {{{", 100, 10
+            return valid_response, 100, 10
 
         with mock.patch("backend.judge.judge.DEV_MODE", False), \
              mock.patch("backend.judge.judge._call_judge_api", side_effect=mock_call_judge):
@@ -464,8 +464,8 @@ class TestJudgeScoring:
         """
         from backend.judge.judge import score_response_async, JUDGE_DIMENSIONS
 
-        async def always_invalid(user_prompt, api_key):
-            return "NOT JSON AT ALL"
+        async def always_invalid(user_prompt, api_key, system_prompt=None):
+            return "NOT JSON AT ALL", 100, 10
 
         with mock.patch("backend.judge.judge.DEV_MODE", False), \
              mock.patch("backend.judge.judge._call_judge_api", side_effect=always_invalid):
