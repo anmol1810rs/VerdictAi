@@ -72,7 +72,9 @@ app.add_middleware(
 
 # Register routers
 from backend.eval.router import router as eval_router  # noqa: E402
+from backend.auth.router import router as auth_router  # noqa: E402
 app.include_router(eval_router, tags=["eval"])
+app.include_router(auth_router, tags=["auth"])
 
 
 @app.get("/health", tags=["system"])

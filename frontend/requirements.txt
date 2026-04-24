@@ -2,3 +2,4 @@ streamlit==1.56.0
 requests==2.33.1
 PyYAML==6.0.3
 pandas==3.0.2
+supabase==2.15.1

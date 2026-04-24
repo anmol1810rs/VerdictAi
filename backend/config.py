@@ -30,3 +30,7 @@ DEV_MOCK: dict = MODELS_CONFIG["dev_mode"]
 
 MAX_PROMPTS = 100
 MIN_PROMPTS = 5
+
+# ── Supabase Auth ──────────────────────────────────────────
+SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
