@@ -12,9 +12,9 @@
 #   6. Rubric preset weights
 #   7. Dev mode mock config
 #
-# MVP MODEL SUMMARY (6 models, 2 per provider):
+# MVP MODEL SUMMARY (7 models):
 #   OpenAI:    gpt-5.4 (flagship), gpt-5.4-mini (budget)
-#   Anthropic: claude-sonnet-4-6 (flagship), claude-haiku-4-5 (budget)
+#   Anthropic: claude-opus-4-7 (most capable), claude-sonnet-4-6 (flagship), claude-haiku-4-5 (budget)
 #   Google:    gemini-2.5-pro (flagship), gemini-2.5-flash (budget)
 #
 # All other models: mvp_enabled: false → hidden in UI, available v1.1
@@ -76,6 +76,23 @@ mvp_models:
       input: "usage.prompt_tokens"
       output: "usage.completion_tokens"
     response_field: "choices[0].message.content"
+
+  - id: claude-opus-4-7
+    api_model_string: "claude-opus-4-7"
+    provider: anthropic
+    display_name: "Claude Opus 4.7"
+    badge: "Most Capable · 1M ctx"
+    color: "#d97706"
+    supports_text: true
+    supports_image: true
+    client_library: "anthropic"
+    request_format: "messages"
+    image_format: "base64_block"               # {"type": "image", "source": {"type": "base64", ...}}
+    token_fields:
+      input: "usage.input_tokens"
+      output: "usage.output_tokens"
+    response_field: "content[0].text"
+    system_prompt_field: "system"              # Anthropic passes system prompt separately
 
   - id: claude-sonnet-4-6
     api_model_string: "claude-sonnet-4-6"
@@ -157,6 +174,7 @@ modality_matrix:
     mvp_compatible_models:
       - gpt-5-4
       - gpt-5-4-mini
+      - claude-opus-4-7
       - claude-sonnet-4-6
       - claude-haiku-4-5
       - gemini-2-5-pro
@@ -168,6 +186,7 @@ modality_matrix:
     mvp_compatible_models:
       - gpt-5-4
       - gpt-5-4-mini
+      - claude-opus-4-7
       - claude-sonnet-4-6
       - gemini-2-5-pro
       - gemini-2-5-flash
@@ -180,6 +199,7 @@ modality_matrix:
     mvp_compatible_models:
       - gpt-5-4
       - gpt-5-4-mini
+      - claude-opus-4-7
       - claude-sonnet-4-6
       - claude-haiku-4-5
       - gemini-2-5-pro
@@ -347,6 +367,7 @@ dev_mode:
   mock_models:                                  # mock responses returned per model in dev
     gpt-5-4: "[MOCK] GPT-5.4 response for development testing."
     gpt-5-4-mini: "[MOCK] GPT-5.4 mini response for development testing."
+    claude-opus-4-7: "[MOCK] Claude Opus 4.7 response for development testing."
     claude-sonnet-4-6: "[MOCK] Claude Sonnet 4.6 response for development testing."
     claude-haiku-4-5: "[MOCK] Claude Haiku 4.5 response for development testing."
     gemini-2-5-pro: "[MOCK] Gemini 2.5 Pro response for development testing."
