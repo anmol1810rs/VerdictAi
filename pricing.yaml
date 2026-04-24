@@ -166,12 +166,31 @@ models:
     supported_modalities: [text]               # image not supported in MVP
     notes: "Text only — image input not supported. Near-frontier performance at budget price."
 
+  claude-opus-4-7:
+    provider: anthropic
+    api_model_string: "claude-opus-4-7"
+    display_name: "Claude Opus 4.7"
+    description: "Anthropic most capable model. 1M context, adaptive thinking, best complex reasoning."
+    mvp_enabled: true
+    is_judge_capable: true
+    is_default_judge: false
+    free_tier: false
+    input_per_1m_usd: 5.00
+    cached_input_per_1m_usd: 0.50
+    output_per_1m_usd: 25.00
+    batch_input_per_1m_usd: 2.50
+    batch_output_per_1m_usd: 12.50
+    context_window_tokens: 1000000
+    max_output_tokens: 32000
+    supported_modalities: [text, image]
+    notes: "New tokenizer uses up to 35% more tokens than Opus 4.6. Adaptive thinking replaces extended thinking. No temperature/top_p support."
+
   claude-opus-4-6:
     provider: anthropic
     api_model_string: "claude-opus-4-6"
     display_name: "Claude Opus 4.6"
     description: "Anthropic most capable model. 1M context, best for complex reasoning."
-    mvp_enabled: false                          # v1.1 — expensive, use Sonnet for MVP
+    mvp_enabled: false                          # superseded by Opus 4.7
     is_judge_capable: true
     is_default_judge: false
     free_tier: false
@@ -183,7 +202,7 @@ models:
     context_window_tokens: 1000000
     max_output_tokens: 8096
     supported_modalities: [text, image]
-    notes: "66% cheaper than previous Opus ($15/$75 → $5/$25). Enable in v1.1."
+    notes: "Superseded by Opus 4.7. Kept for reference."
 
   # ════════════════════════════════════════════════════════
   # GOOGLE GEMINI
