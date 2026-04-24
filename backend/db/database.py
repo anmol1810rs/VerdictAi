@@ -64,6 +64,7 @@ def _migrate_add_columns() -> None:
         "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS gt_tokens_in INTEGER",
         "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS gt_tokens_out INTEGER",
         "ALTER TABLE model_results ADD COLUMN IF NOT EXISTS gt_cost_usd REAL",
+        "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS user_id VARCHAR",
     ]
     with engine.connect() as conn:
         for stmt in stmts:

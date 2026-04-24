@@ -25,10 +25,11 @@ import zipfile
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from backend.config import DEV_MODE, MAX_PROMPTS, MIN_PROMPTS, MODELS_CONFIG
+
 
 logger = logging.getLogger(__name__)
 from backend.db.database import SessionLocal, get_db
@@ -69,6 +70,21 @@ _KEY_PATTERNS = re.compile(
 def _sanitize_error(exc: Exception) -> str:
     """Strip API key patterns from exception messages before storing or returning."""
     return _KEY_PATTERNS.sub("[REDACTED]", str(exc))[:500]
+
+
+def _get_user_id(x_user_id: str = Header(default="")) -> Optional[str]:
+    """Read X-User-ID header. Returns None in DEV_MODE (auth bypass for local dev)."""
+    if DEV_MODE:
+        return None
+    return x_user_id.strip() or None
+
+
+def _assert_run_owner(run: EvalRun, user_id: Optional[str]) -> None:
+    """Raise 403 if the run belongs to a different user. No-op in DEV_MODE."""
+    if DEV_MODE or user_id is None:
+        return
+    if run.user_id and run.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied.")
 
 
 # Constants for validation
@@ -786,6 +802,7 @@ def start_eval_run(
     request: EvalRunRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(_get_user_id),
 ):
     """
     Create an eval run immediately with status=pending, then execute via BackgroundTask.
@@ -810,6 +827,7 @@ def start_eval_run(
         engineer_names=engineer_names or None,
         status="pending",
         custom_label=request.custom_label,
+        user_id=user_id,
     )
     db.add(run)
     db.commit()
@@ -916,14 +934,17 @@ def get_eval_history(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(_get_user_id),
 ):
     """
-    Return all eval runs ordered most-recent first.
-    Filters: model (string match in models_selected JSON),
-             engineer (case-insensitive match in engineer_names JSON),
-             date_from / date_to (ISO date strings YYYY-MM-DD).
+    Return eval runs for the requesting user, ordered most-recent first.
+    In DEV_MODE returns all runs. In prod filters by X-User-ID header.
     """
     query = db.query(EvalRun).order_by(EvalRun.created_at.desc())
+
+    # Scope to the authenticated user's runs
+    if user_id:
+        query = query.filter(EvalRun.user_id == user_id)
 
     # Date filters — applied in SQL
     if date_from:
@@ -1076,7 +1097,7 @@ def compare_runs(
 
 
 @router.get("/eval/{run_id}/export/pdf")
-def export_pdf(run_id: str, db: Session = Depends(get_db)):
+def export_pdf(run_id: str, db: Session = Depends(get_db), user_id: Optional[str] = Depends(_get_user_id)):
     """
     Generate and return a PDF evaluation report for a completed run.
     Max 2 pages. Per-prompt section shows top 5 prompts by variance score.
@@ -1087,6 +1108,7 @@ def export_pdf(run_id: str, db: Session = Depends(get_db)):
     run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    _assert_run_owner(run, user_id)
     if run.status != "complete":
         raise HTTPException(
             status_code=400,
@@ -1113,7 +1135,7 @@ def export_pdf(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/eval/{run_id}/export/json")
-def export_json(run_id: str, db: Session = Depends(get_db)):
+def export_json(run_id: str, db: Session = Depends(get_db), user_id: Optional[str] = Depends(_get_user_id)):
     """
     Generate and return the canonical JSON export for a completed eval run.
     Content-Disposition filename: verdictai_{label}_{date}.json
@@ -1124,6 +1146,7 @@ def export_json(run_id: str, db: Session = Depends(get_db)):
     run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    _assert_run_owner(run, user_id)
     if run.status != "complete":
         raise HTTPException(
             status_code=400,
@@ -1219,11 +1242,12 @@ def get_eval_status(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/eval/{run_id}/results", response_model=EvalResultsResponse)
-def get_eval_results(run_id: str, db: Session = Depends(get_db)):
+def get_eval_results(run_id: str, db: Session = Depends(get_db), user_id: Optional[str] = Depends(_get_user_id)):
     """Fetch stored results for a completed eval run."""
     run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail=f"Eval run '{run_id}' not found.")
+    _assert_run_owner(run, user_id)
 
     db_results = db.query(ModelResult).filter(ModelResult.eval_run_id == run_id).all()
     db_verdict = db.query(Verdict).filter(Verdict.eval_run_id == run_id).first()

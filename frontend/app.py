@@ -7,6 +7,8 @@ Session 2: full validation (Story 1.6), modality detection (Story 1.5),
 Session 3: background eval + status polling (Story 1.7),
            run history sidebar with filters (Story 1.8).
 Session 4: real multi-model runner + LLM-as-Judge + verdict display (Stories 2.1, 2.2).
+Auth:      Supabase email/password login — each user sees only their own runs.
+           DEV_MODE bypasses auth entirely for local development.
 """
 import os
 import time
@@ -15,12 +17,7 @@ import requests
 import streamlit as st
 import yaml
 
-try:
-    BACKEND_URL = st.secrets.get("BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:8000"))
-except Exception:
-    BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
-
-# ── Page config ────────────────────────────────────────────────────────────
+# ── Page config (must be first Streamlit call) ─────────────────────────────
 
 st.set_page_config(
     page_title="VerdictAI",
@@ -28,6 +25,113 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Config ─────────────────────────────────────────────────────────────────
+
+try:
+    BACKEND_URL = st.secrets.get("BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:8000"))
+    SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
+    SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY", ""))
+except Exception:
+    BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+    SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+    SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+
+DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
+
+# ── Auth helpers ───────────────────────────────────────────────────────────
+
+def _get_supabase_client():
+    from supabase import create_client
+    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+
+def _auth_headers() -> dict:
+    """Return X-User-ID header for all backend API calls. Empty dict in DEV_MODE."""
+    if DEV_MODE:
+        return {}
+    user = st.session_state.get("user")
+    if user:
+        return {"X-User-ID": user.id}
+    return {}
+
+
+def _show_login_page():
+    """Render the login / sign-up page. Sets st.session_state.user on success."""
+    st.title("⚖️ VerdictAI")
+    st.caption("Run structured LLM evaluations in minutes.")
+    st.divider()
+
+    col1, col2, col3 = st.columns([1, 1.2, 1])
+    with col2:
+        tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
+
+        with tab_login:
+            st.subheader("Welcome back")
+            email = st.text_input("Email", key="login_email", placeholder="you@example.com")
+            password = st.text_input("Password", type="password", key="login_password")
+            if st.button("Log In", use_container_width=True, type="primary"):
+                if not email or not password:
+                    st.error("Enter your email and password.")
+                else:
+                    try:
+                        sb = _get_supabase_client()
+                        resp = sb.auth.sign_in_with_password({"email": email, "password": password})
+                        st.session_state.user = resp.user
+                        st.session_state.access_token = resp.session.access_token
+                        st.session_state.show_welcome = "returning"
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Login failed: {exc}")
+
+        with tab_signup:
+            st.subheader("Create account")
+            email_s = st.text_input("Email", key="signup_email", placeholder="you@example.com")
+            password_s = st.text_input("Password", type="password", key="signup_password",
+                                        help="Minimum 6 characters.")
+            if st.button("Sign Up", use_container_width=True, type="primary"):
+                if not email_s or not password_s:
+                    st.error("Enter an email and password.")
+                elif len(password_s) < 6:
+                    st.error("Password must be at least 6 characters.")
+                else:
+                    try:
+                        sb = _get_supabase_client()
+                        resp = sb.auth.sign_up({"email": email_s, "password": password_s})
+                        if resp.user and resp.session:
+                            st.session_state.user = resp.user
+                            st.session_state.access_token = resp.session.access_token
+                            st.session_state.show_welcome = "new"
+                            st.rerun()
+                        else:
+                            st.success(
+                                "Account created! Check your email to confirm, then log in."
+                            )
+                    except Exception as exc:
+                        st.error(f"Sign-up failed: {exc}")
+
+
+# ── Auth gate — skip in DEV_MODE ───────────────────────────────────────────
+
+if not DEV_MODE:
+    if "user" not in st.session_state:
+        st.session_state.user = None
+    if "access_token" not in st.session_state:
+        st.session_state.access_token = None
+
+    if st.session_state.user is None:
+        _show_login_page()
+        st.stop()
+
+    # Show welcome toast once after login / sign-up
+    welcome_type = st.session_state.pop("show_welcome", None)
+    if welcome_type:
+        _email = st.session_state.user.email or ""
+        _name = _email.split("@")[0]
+        if welcome_type == "new":
+            st.toast(f"Account created — welcome to VerdictAI, {_name}!", icon="🎉")
+        else:
+            st.toast(f"Welcome back, {_name}!", icon="👋")
 
 # ── Backend wakeup check (Render free tier cold start) ─────────────────────
 
@@ -104,6 +208,21 @@ if "history_engineer_filter" not in st.session_state:
 with st.sidebar:
     st.title("⚖️ VerdictAI")
     st.caption("Run structured LLM evaluations in minutes.")
+
+    # ── User info + logout ────────────────────────────────────────────────
+    if not DEV_MODE and st.session_state.get("user"):
+        user_email = st.session_state.user.email or "unknown"
+        st.caption(f"Logged in as **{user_email}**")
+        if st.button("Log Out", use_container_width=True):
+            try:
+                sb = _get_supabase_client()
+                sb.auth.sign_out()
+            except Exception:
+                pass
+            st.session_state.user = None
+            st.session_state.access_token = None
+            st.rerun()
+
     st.divider()
 
     # ── API Keys ──────────────────────────────────────────────────────────
@@ -193,7 +312,7 @@ with st.sidebar:
         if filter_date_to:
             params["date_to"] = filter_date_to.isoformat()
 
-        hist_resp = requests.get(f"{BACKEND_URL}/eval/history", params=params, timeout=5)
+        hist_resp = requests.get(f"{BACKEND_URL}/eval/history", params=params, headers=_auth_headers(), timeout=5)
         if hist_resp.status_code == 200:
             history_data = hist_resp.json()
             runs = history_data.get("runs", [])
@@ -510,7 +629,7 @@ with tab_run:
     polling_run_id = st.session_state.get("polling_run_id")
     if polling_run_id:
         try:
-            status_resp = requests.get(f"{BACKEND_URL}/eval/{polling_run_id}/status", timeout=5)
+            status_resp = requests.get(f"{BACKEND_URL}/eval/{polling_run_id}/status", headers=_auth_headers(), timeout=5)
             if status_resp.status_code == 200:
                 status_data = status_resp.json()
                 current_status = status_data["status"]
@@ -565,7 +684,7 @@ with tab_run:
         }
 
         try:
-            resp = requests.post(f"{BACKEND_URL}/eval/run", json=payload, timeout=30)
+            resp = requests.post(f"{BACKEND_URL}/eval/run", json=payload, headers=_auth_headers(), timeout=30)
             if resp.status_code == 200:
                 run_id = resp.json()["run_id"]
                 st.session_state.polling_run_id = run_id
@@ -700,7 +819,7 @@ with tab_results:
         st.info("No evaluation run yet. Complete an eval in the **▶️ Run Evaluation** tab.")
     else:
         try:
-            resp = requests.get(f"{BACKEND_URL}/eval/{run_id}/results", timeout=10)
+            resp = requests.get(f"{BACKEND_URL}/eval/{run_id}/results", headers=_auth_headers(), timeout=10)
             if resp.status_code != 200:
                 try:
                     err = resp.json()
@@ -1101,6 +1220,7 @@ with tab_results:
                                             try:
                                                 _ir = requests.get(
                                                     f"{BACKEND_URL}/eval/{run_id}/image/{idx}",
+                                                    headers=_auth_headers(),
                                                     timeout=10,
                                                 )
                                                 st.session_state[_img_data_key] = (
@@ -1235,6 +1355,7 @@ with tab_results:
                 try:
                     _pdf_resp = requests.get(
                         f"{BACKEND_URL}/eval/{run_id_for_export}/export/pdf",
+                        headers=_auth_headers(),
                         timeout=30,
                     )
                     if _pdf_resp.status_code == 200:
@@ -1265,6 +1386,7 @@ with tab_results:
                 try:
                     _json_resp = requests.get(
                         f"{BACKEND_URL}/eval/{run_id_for_export}/export/json",
+                        headers=_auth_headers(),
                         timeout=30,
                     )
                     if _json_resp.status_code == 200:
@@ -1310,7 +1432,7 @@ with tab_results:
     st.caption("Select two completed runs to see side-by-side score and cost deltas.")
 
     try:
-        hist_r = requests.get(f"{BACKEND_URL}/eval/history", timeout=5)
+        hist_r = requests.get(f"{BACKEND_URL}/eval/history", headers=_auth_headers(), timeout=5)
         if hist_r.status_code == 200:
             all_hist_runs = hist_r.json().get("runs", [])
             done_runs = [r for r in all_hist_runs if r["status"] == "complete"]
@@ -1337,6 +1459,7 @@ with tab_results:
                     cmp_r = requests.get(
                         f"{BACKEND_URL}/eval/compare",
                         params={"run_a": aid, "run_b": bid},
+                        headers=_auth_headers(),
                         timeout=10,
                     )
                     if cmp_r.status_code == 200:

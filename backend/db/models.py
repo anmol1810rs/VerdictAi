@@ -25,6 +25,7 @@ class EvalRun(Base):
     custom_label = Column(String, nullable=True)
     error_message = Column(String, nullable=True)   # set on status=failed
     completed_at = Column(DateTime, nullable=True)  # set on status=complete or failed
+    user_id = Column(String, nullable=True)          # Supabase auth user UUID; null = legacy run
     # NOTE: API keys are NEVER stored — only kept in request memory
 
 
